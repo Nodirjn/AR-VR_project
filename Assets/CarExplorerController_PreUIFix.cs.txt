@@ -1,0 +1,500 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+/// <summary>
+/// First-pass VR/desktop explorer for the existing CarConcept GLB hierarchy.
+/// Moves only named, meaningful assemblies; all transforms are restored exactly.
+/// </summary>
+public sealed class CarExplorerController : MonoBehaviour
+{
+    [SerializeField] private Transform carRoot;
+    [SerializeField] private Camera viewCamera;
+    [SerializeField, Min(0.1f)] private float transitionDuration = 0.8f;
+    [SerializeField, Min(1f)] private float rayDistance = 20f;
+
+    private sealed class Part
+    {
+        public Transform Target;
+        public string DisplayName;
+        public string Description;
+        public Vector3 OriginalPosition;
+        public Quaternion OriginalRotation;
+        public Vector3 OriginalScale;
+        public Vector3 ExplodedPosition;
+        public Vector3 FromPosition;
+        public Quaternion FromRotation;
+        public Vector3 FromScale;
+        public Collider SelectionCollider;
+        public Renderer[] Renderers;
+        public MaterialPropertyBlock[] OriginalBlocks;
+    }
+
+    private enum Command { Explode, Restore, Reset }
+
+    private readonly List<Part> parts = new List<Part>();
+    private readonly Dictionary<Collider, Part> partByCollider = new Dictionary<Collider, Part>();
+    private readonly Dictionary<Collider, Command> commandByCollider = new Dictionary<Collider, Command>();
+    private readonly List<InputAction> actions = new List<InputAction>();
+
+    private InputAction selectAction;
+    private InputAction explodeAction;
+    private InputAction restoreAction;
+    private InputAction resetAction;
+    private Transform panelRoot;
+    private TextMesh titleText;
+    private TextMesh nameText;
+    private TextMesh descriptionText;
+    private TextMesh statusText;
+    private Part selectedPart;
+    private bool exploded;
+    private float transitionT = 1f;
+    private const float HighlightAmount = 0.34f;
+    private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+    private static readonly int ColorId = Shader.PropertyToID("_Color");
+
+    private void Awake()
+    {
+        if (carRoot == null)
+        {
+            GameObject car = GameObject.Find("CarConcept");
+            if (car != null)
+                carRoot = car.transform;
+        }
+
+        if (viewCamera == null)
+            viewCamera = Camera.main;
+
+        if (carRoot == null)
+        {
+            Debug.LogError("[Car Explorer] Could not find the existing CarConcept root.");
+            enabled = false;
+            return;
+        }
+
+        BuildNamedParts();
+        if (parts.Count == 0)
+        {
+            Debug.LogError("[Car Explorer] No supported named car parts were found.");
+            enabled = false;
+            return;
+        }
+
+        BuildPanel();
+        BuildInputActions();
+        UpdatePanel();
+    }
+
+    private void OnDestroy()
+    {
+        foreach (InputAction action in actions)
+        {
+            action.Disable();
+            action.Dispose();
+        }
+
+        actions.Clear();
+    }
+
+    private void Update()
+    {
+        AnimateParts();
+        FollowCamera();
+
+        Keyboard keyboard = Keyboard.current;
+        if (keyboard != null)
+        {
+            if (keyboard.oKey.wasPressedThisFrame) Explode();
+            if (keyboard.rKey.wasPressedThisFrame) Restore();
+            if (keyboard.tKey.wasPressedThisFrame) ResetExplorer();
+        }
+
+        Mouse mouse = Mouse.current;
+        if (mouse != null && mouse.leftButton.wasPressedThisFrame && viewCamera != null)
+            ProcessRay(viewCamera.ScreenPointToRay(mouse.position.ReadValue()));
+
+        if (selectAction != null && selectAction.WasPressedThisFrame())
+            ProcessRay(viewCamera != null
+                ? viewCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f))
+                : default);
+
+        if (explodeAction != null && explodeAction.WasPressedThisFrame()) Explode();
+        if (restoreAction != null && restoreAction.WasPressedThisFrame()) Restore();
+        if (resetAction != null && resetAction.WasPressedThisFrame()) ResetExplorer();
+    }
+
+    private void BuildNamedParts()
+    {
+        AddPart("Bonnet / hood", "BodyHood",
+            "Front hood group with attached trim and lights.",
+            new Vector3(0f, -0.42f, 0.36f));
+
+        AddPart("Left door", "BodyDoorLColor1",
+            "Left door group with glass, mirror and trim.",
+            new Vector3(-0.55f, 0f, 0.05f));
+
+        AddPart("Right door", "BodyDoorRColor1",
+            "Right door group with glass, mirror and trim.",
+            new Vector3(0.55f, 0f, 0.05f));
+
+        AddPart("Front left wheel", "WheelFrontL",
+            "Wheel assembly with tyre, rim and brake parts.",
+            new Vector3(-0.38f, -0.08f, 0.08f));
+
+        AddPart("Front right wheel", "WheelFrontR",
+            "Wheel assembly with tyre, rim and brake parts.",
+            new Vector3(0.38f, -0.08f, 0.08f));
+
+        AddPart("Rear left wheel", "WheelRearL",
+            "Wheel assembly with tyre, rim and brake parts.",
+            new Vector3(-0.38f, 0.08f, 0.08f));
+
+        AddPart("Rear right wheel", "WheelRearR",
+            "Wheel assembly with tyre, rim and brake parts.",
+            new Vector3(0.38f, 0.08f, 0.08f));
+
+        AddPart("Roof panel", "BodyRoofPanel",
+            "Separate exterior roof panel.",
+            new Vector3(0f, 0f, 0.34f));
+
+        AddPart("Engine", "Engine",
+            "Separate engine mesh in the front engine bay.",
+            new Vector3(0f, -0.08f, 0.24f));
+    }
+
+    private void AddPart(string displayName, string nodeName, string description, Vector3 offset)
+    {
+        Transform target = carRoot.Find(nodeName);
+        if (target == null)
+        {
+            Debug.LogWarning("[Car Explorer] Expected node is missing; skipped: " + nodeName);
+            return;
+        }
+
+        Renderer[] renderers = target.GetComponentsInChildren<Renderer>(true);
+        if (renderers.Length == 0)
+        {
+            Debug.LogWarning("[Car Explorer] Node has no renderers; skipped: " + nodeName);
+            return;
+        }
+
+        Part part = new Part
+        {
+            Target = target,
+            DisplayName = displayName,
+            Description = description,
+            OriginalPosition = target.localPosition,
+            OriginalRotation = target.localRotation,
+            OriginalScale = target.localScale,
+            ExplodedPosition = target.localPosition + offset,
+            Renderers = renderers,
+            OriginalBlocks = new MaterialPropertyBlock[renderers.Length]
+        };
+
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            part.OriginalBlocks[i] = new MaterialPropertyBlock();
+            renderers[i].GetPropertyBlock(part.OriginalBlocks[i]);
+        }
+
+        part.SelectionCollider = CreateBoundsCollider(target, renderers);
+        if (part.SelectionCollider != null)
+            partByCollider[part.SelectionCollider] = part;
+
+        parts.Add(part);
+    }
+
+    private static Collider CreateBoundsCollider(Transform target, Renderer[] renderers)
+    {
+        bool hasBounds = false;
+        Vector3 min = Vector3.zero;
+        Vector3 max = Vector3.zero;
+
+        foreach (Renderer renderer in renderers)
+        {
+            Bounds bounds = renderer.bounds;
+            for (int x = 0; x < 2; x++)
+            for (int y = 0; y < 2; y++)
+            for (int z = 0; z < 2; z++)
+            {
+                Vector3 worldCorner = new Vector3(
+                    x == 0 ? bounds.min.x : bounds.max.x,
+                    y == 0 ? bounds.min.y : bounds.max.y,
+                    z == 0 ? bounds.min.z : bounds.max.z);
+                Vector3 localCorner = target.InverseTransformPoint(worldCorner);
+                if (!hasBounds)
+                {
+                    min = max = localCorner;
+                    hasBounds = true;
+                }
+                else
+                {
+                    min = Vector3.Min(min, localCorner);
+                    max = Vector3.Max(max, localCorner);
+                }
+            }
+        }
+
+        if (!hasBounds)
+            return null;
+
+        BoxCollider collider = target.GetComponent<BoxCollider>();
+        if (collider == null)
+            collider = target.gameObject.AddComponent<BoxCollider>();
+        collider.center = (min + max) * 0.5f;
+        collider.size = Vector3.Max(max - min, Vector3.one * 0.025f);
+        collider.isTrigger = false;
+        return collider;
+    }
+
+    private void BuildInputActions()
+    {
+        selectAction = CreateAction("Car Explorer Select", InputActionType.Button,
+            "<XRController>{RightHand}/trigger");
+        explodeAction = CreateAction("Car Explorer Explode", InputActionType.Button,
+            "<XRController>{RightHand}/primaryButton");
+        restoreAction = CreateAction("Car Explorer Restore", InputActionType.Button,
+            "<XRController>{RightHand}/secondaryButton");
+        resetAction = CreateAction("Car Explorer Reset", InputActionType.Button,
+            "<XRController>{LeftHand}/menuButton");
+
+        selectAction.Enable();
+        explodeAction.Enable();
+        restoreAction.Enable();
+        resetAction.Enable();
+    }
+
+    private InputAction CreateAction(string actionName, InputActionType type, string binding)
+    {
+        InputAction action = new InputAction(actionName, type, binding);
+        actions.Add(action);
+        return action;
+    }
+
+    private void BuildPanel()
+    {
+        panelRoot = new GameObject("Car Explorer World Panel").transform;
+        panelRoot.SetParent(transform, false);
+
+        titleText = CreateText("Title", "CAR EXPLORER", new Vector3(0f, 0.14f, 0f), 0.018f,
+            new Color(0.88f, 0.68f, 0.34f, 1f));
+        nameText = CreateText("Selected Part", "Select a named part", new Vector3(0f, 0.09f, 0f), 0.016f,
+            Color.white);
+        descriptionText = CreateText("Part Description", "Bonnet, doors, wheels, roof and engine.",
+            new Vector3(0f, 0.035f, 0f), 0.012f, new Color(0.88f, 0.9f, 0.93f, 1f));
+        statusText = CreateText("Explorer Status", "Boot/trunk lid is not clearly separated in this model.",
+            new Vector3(0f, -0.025f, 0f), 0.010f, new Color(0.78f, 0.81f, 0.85f, 1f));
+
+        CreateCommandButton("Explode", Command.Explode, new Vector3(-0.17f, -0.105f, 0f));
+        CreateCommandButton("Restore", Command.Restore, new Vector3(0f, -0.105f, 0f));
+        CreateCommandButton("Reset", Command.Reset, new Vector3(0.17f, -0.105f, 0f));
+
+        CreateText("Keyboard Help", "O Explode   R Restore   T Reset",
+            new Vector3(0f, -0.16f, 0f), 0.010f, new Color(0.88f, 0.9f, 0.93f, 1f));
+        CreateText("Controller Help", "Right trigger select   A explode   B restore   Left menu reset",
+            new Vector3(0f, -0.195f, 0f), 0.008f, new Color(0.74f, 0.77f, 0.81f, 1f));
+    }
+
+    private TextMesh CreateText(string objectName, string text, Vector3 localPosition, float characterSize, Color color)
+    {
+        GameObject label = new GameObject(objectName);
+        label.transform.SetParent(panelRoot, false);
+        label.transform.localPosition = localPosition;
+
+        TextMesh mesh = label.AddComponent<TextMesh>();
+        mesh.text = text;
+        mesh.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        mesh.fontSize = 64;
+        mesh.characterSize = characterSize;
+        mesh.anchor = TextAnchor.MiddleCenter;
+        mesh.alignment = TextAlignment.Center;
+        mesh.color = color;
+        mesh.richText = false;
+        return mesh;
+    }
+
+    private void CreateCommandButton(string label, Command command, Vector3 localPosition)
+    {
+        TextMesh mesh = CreateText(label + " Button", "[" + label.ToUpperInvariant() + "]",
+            localPosition, 0.013f, new Color(0.98f, 0.84f, 0.58f, 1f));
+        BoxCollider collider = mesh.gameObject.AddComponent<BoxCollider>();
+        collider.size = new Vector3(0.15f, 0.045f, 0.025f);
+        commandByCollider[collider] = command;
+    }
+
+    private void FollowCamera()
+    {
+        if (panelRoot == null || viewCamera == null)
+            return;
+
+        Transform cameraTransform = viewCamera.transform;
+        panelRoot.position = cameraTransform.position +
+                             cameraTransform.forward * 1.25f -
+                             cameraTransform.up * 0.12f;
+        panelRoot.rotation = Quaternion.LookRotation(-cameraTransform.forward, cameraTransform.up);
+    }
+
+    private void ProcessRay(Ray ray)
+    {
+        if (ray.direction.sqrMagnitude < 0.5f)
+            return;
+
+        // Showroom props and in-scene screens may have their own colliders.
+        // Skip those and select the nearest hit that belongs to an explorer part
+        // or one of this panel's command buttons.
+        RaycastHit[] hits = Physics.RaycastAll(ray, rayDistance, Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Ignore);
+        Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
+        foreach (RaycastHit hit in hits)
+        {
+            if (commandByCollider.TryGetValue(hit.collider, out Command command))
+            {
+                RunCommand(command);
+                return;
+            }
+
+            if (partByCollider.TryGetValue(hit.collider, out Part part))
+            {
+                SelectPart(part);
+                return;
+            }
+        }
+
+        SelectPart(null);
+    }
+
+    private void RunCommand(Command command)
+    {
+        switch (command)
+        {
+            case Command.Explode: Explode(); break;
+            case Command.Restore: Restore(); break;
+            case Command.Reset: ResetExplorer(); break;
+        }
+    }
+
+    public void Explode()
+    {
+        if (exploded)
+            return;
+
+        exploded = true;
+        BeginTransition(true);
+        UpdatePanel();
+    }
+
+    public void Restore()
+    {
+        exploded = false;
+        BeginTransition(false);
+        UpdatePanel();
+    }
+
+    public void ResetExplorer()
+    {
+        exploded = false;
+        BeginTransition(false);
+        SelectPart(null);
+        UpdatePanel();
+    }
+
+    private void BeginTransition(bool toExploded)
+    {
+        transitionT = 0f;
+        foreach (Part part in parts)
+        {
+            part.FromPosition = part.Target.localPosition;
+            part.FromRotation = part.Target.localRotation;
+            part.FromScale = part.Target.localScale;
+        }
+    }
+
+    private void AnimateParts()
+    {
+        if (transitionT >= 1f)
+            return;
+
+        transitionT = Mathf.Min(1f, transitionT + Time.deltaTime / Mathf.Max(0.1f, transitionDuration));
+        float eased = transitionT * transitionT * (3f - 2f * transitionT);
+
+        foreach (Part part in parts)
+        {
+            Vector3 targetPosition = exploded ? part.ExplodedPosition : part.OriginalPosition;
+            part.Target.localPosition = Vector3.LerpUnclamped(part.FromPosition, targetPosition, eased);
+            part.Target.localRotation = Quaternion.SlerpUnclamped(part.FromRotation, part.OriginalRotation, eased);
+            part.Target.localScale = Vector3.LerpUnclamped(part.FromScale, part.OriginalScale, eased);
+        }
+
+        if (transitionT >= 1f && !exploded)
+            RestoreExactTransforms();
+    }
+
+    private void RestoreExactTransforms()
+    {
+        foreach (Part part in parts)
+        {
+            part.Target.localPosition = part.OriginalPosition;
+            part.Target.localRotation = part.OriginalRotation;
+            part.Target.localScale = part.OriginalScale;
+        }
+    }
+
+    private void SelectPart(Part part)
+    {
+        if (selectedPart == part)
+            return;
+
+        ClearHighlight(selectedPart);
+        selectedPart = part;
+        ApplyHighlight(selectedPart);
+        UpdatePanel();
+    }
+
+    private void ApplyHighlight(Part part)
+    {
+        if (part == null)
+            return;
+
+        Color highlight = Color.Lerp(Color.white, new Color(0.95f, 0.61f, 0.2f, 1f), HighlightAmount);
+        foreach (Renderer renderer in part.Renderers)
+        {
+            if (renderer == null)
+                continue;
+
+            MaterialPropertyBlock block = new MaterialPropertyBlock();
+            renderer.GetPropertyBlock(block);
+            block.SetColor(BaseColorId, highlight);
+            block.SetColor(ColorId, highlight);
+            renderer.SetPropertyBlock(block);
+        }
+    }
+
+    private void ClearHighlight(Part part)
+    {
+        if (part == null)
+            return;
+
+        for (int i = 0; i < part.Renderers.Length; i++)
+        {
+            Renderer renderer = part.Renderers[i];
+            if (renderer != null)
+                renderer.SetPropertyBlock(part.OriginalBlocks[i]);
+        }
+    }
+
+    private void UpdatePanel()
+    {
+        if (nameText == null)
+            return;
+
+        nameText.text = selectedPart != null ? selectedPart.DisplayName : "Select a named part";
+        descriptionText.text = selectedPart != null
+            ? selectedPart.Description
+            : "Bonnet, doors, four wheels, roof, engine.";
+        statusText.text = exploded
+            ? "Exploded view active. Restore returns exact transforms."
+            : "Boot/trunk lid is not clearly separated in this model.";
+    }
+}
