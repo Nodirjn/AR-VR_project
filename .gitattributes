@@ -1,0 +1,29 @@
+# Git LFS for large binary assets added from here on.
+# Files already in history before LFS was enabled stay in plain Git; no history rewrite.
+# Teammates need git-lfs installed (`git lfs install` once per machine).
+
+# Third-party CC0 content (Poly Haven, ambientCG): textures, HDRIs, model buffers
+Assets/ThirdParty/**/*.png filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.tga filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.tif filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.exr filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.hdr filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.bin filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.glb filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.fbx filter=lfs diff=lfs merge=lfs -text
+Assets/ThirdParty/**/*.obj filter=lfs diff=lfs merge=lfs -text
+
+# Baked lighting written by Generate Lighting
+Assets/Scenes/**/Lightmap-*.exr filter=lfs diff=lfs merge=lfs -text
+Assets/Scenes/**/Lightmap-*.png filter=lfs diff=lfs merge=lfs -text
+Assets/Scenes/**/ReflectionProbe-*.exr filter=lfs diff=lfs merge=lfs -text
+Assets/Scenes/**/LightingData.asset filter=lfs diff=lfs merge=lfs -text
+
+# Realism textures generated or copied by the Aurelle/Realism tools
+Assets/Materials/Realism/**/*.png filter=lfs diff=lfs merge=lfs -text
+Assets/Materials/Realism/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+Assets/Materials/Realism/**/*.exr filter=lfs diff=lfs merge=lfs -text
+Assets/Models/Presenter/Textures/*.png filter=lfs diff=lfs merge=lfs -text
+Assets/Models/Presenter/Textures/*.jpg filter=lfs diff=lfs merge=lfs -text

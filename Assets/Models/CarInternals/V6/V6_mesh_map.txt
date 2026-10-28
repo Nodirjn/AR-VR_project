@@ -1,0 +1,39 @@
+# Merged V6 meshes, written by the car internals tool (V6MeshMerge). One line per copy:
+# asset	source glb	source GUID	source local file ID	source mesh	source submeshes	vertices	triangles
+Assets/Models/CarInternals/V6/Air turbo (Supercharger).asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-128000308252996345	Air turbo (Supercharger)	32	7534	12771
+Assets/Models/CarInternals/V6/Air turbo (Supercharger)001.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-1593895428519167926	Air turbo (Supercharger)001	39	3986	6204
+Assets/Models/CarInternals/V6/Cam shaft retainer.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	4754379687991925522	Cam shaft retainer	14	440	420
+Assets/Models/CarInternals/V6/Cam shaft.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	3802594102505615815	Cam shaft	45	1462	1396
+Assets/Models/CarInternals/V6/Cam2.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	6105769011378035673	Cam2	4	392	388
+Assets/Models/CarInternals/V6/Crankshaft.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-1838742185468766904	Crankshaft	129	7333	10402
+Assets/Models/CarInternals/V6/Engine air filter.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	8944947313944711660	Engine air filter	74	1052	1456
+Assets/Models/CarInternals/V6/Engine air filter001.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	3561504977499574164	Engine air filter001	4	901	1446
+Assets/Models/CarInternals/V6/Engine air filter002.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	6522185694777828368	Engine air filter002	5	990	1494
+Assets/Models/CarInternals/V6/Engine belt wheels 1.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	8513688108195790977	Engine belt wheels 1	233	4036	3580
+Assets/Models/CarInternals/V6/Engine belt wheels 2.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-3120593087948390254	Engine belt wheels 2	653	9728	8432
+Assets/Models/CarInternals/V6/Engine block.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	5907710337538656820	Engine block	346	6601	6274
+Assets/Models/CarInternals/V6/Engine cylinder head.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	7227430760199332512	Engine cylinder head	111	10364	14808
+Assets/Models/CarInternals/V6/Engine side cover.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-5898741190817038442	Engine side cover	146	5897	7792
+Assets/Models/CarInternals/V6/Engine valve.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	5005093284433956157	Engine valve	7	895	1334
+Assets/Models/CarInternals/V6/Exhaust manifold 1.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	8247456641943508042	Exhaust manifold 1	76	8752	14574
+Assets/Models/CarInternals/V6/Exhaust manifold 2.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	6860261331155446944	Exhaust manifold 2	76	8763	14586
+Assets/Models/CarInternals/V6/Horse 1_Engine assembly.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	3334617326449925372	Horse 1^Engine assembly	5	2564	4818
+Assets/Models/CarInternals/V6/Horse 2_Engine assembly.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-5267781242952116585	Horse 2^Engine assembly	4	2007	3750
+Assets/Models/CarInternals/V6/Intake manifold mirored.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-2593408168900928976	Intake manifold mirored	30	456	408
+Assets/Models/CarInternals/V6/Intake manifold mirored001.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	1562027402977609812	Intake manifold mirored001	30	456	408
+Assets/Models/CarInternals/V6/Intake manifold mirored002.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-5533504887134063976	Intake manifold mirored002	5	4568	8688
+Assets/Models/CarInternals/V6/Intake manifold mirored003.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-4421357062007018841	Intake manifold mirored003	5	4506	8564
+Assets/Models/CarInternals/V6/Intake manifold mirored004.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-2553716574568299626	Intake manifold mirored004	147	10737	17326
+Assets/Models/CarInternals/V6/Oil pan.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-8555367686567810825	Oil pan	336	9963	11802
+Assets/Models/CarInternals/V6/Piston head.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-7543870729253351860	Piston head	84	3997	4660
+Assets/Models/CarInternals/V6/Piston pin.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	2865027698956965863	Piston pin 	6	436	476
+Assets/Models/CarInternals/V6/Piston rod cap.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	2194793367736969718	Piston rod cap	22	1819	2390
+Assets/Models/CarInternals/V6/Piston rod.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-2571279400462705610	Piston rod	97	4742	6608
+Assets/Models/CarInternals/V6/Rocker arm backing spring.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-4392042848150524779	Rocker arm backing spring	10	10543	19822
+Assets/Models/CarInternals/V6/Rocker arm pin1.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-3118577851706466684	Rocker arm pin1	6	576	628
+Assets/Models/CarInternals/V6/Rocker arm pin2.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-221797544866199160	Rocker arm pin2	5	290	324
+Assets/Models/CarInternals/V6/Rocker arm roll.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-8269951070163400061	Rocker arm roll	6	594	656
+Assets/Models/CarInternals/V6/Rocker arm.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	1194024663550890984	Rocker arm	33	1094	1048
+Assets/Models/CarInternals/V6/Valve cover 2.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	8138488113842792808	Valve cover 2	265	9058	10602
+Assets/Models/CarInternals/V6/cam1.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	1329166415795341764	cam1	6	654	648
+Assets/Models/CarInternals/V6/hex screw gradeab fine_iso_ISO 8676 - M8x1.0 x 55-N.asset	Assets/Models/V6_Engine_Prototype.glb	c7d08124fcdc54226a6fff8249ff348f	-6013160798962683321	hex screw gradeab fine_iso_ISO 8676 - M8x1.0 x 55-N	25	788	970

@@ -1,0 +1,5 @@
+Source: https://polyhaven.com/a/side_table_01
+License: CC0 1.0 Universal (public domain dedication), https://polyhaven.com/license
+Downloaded via the Poly Haven public API (dl.polyhaven.org) on 2026-10-28.
+Changes: resized to the listed resolution; *_mask_*.png packs metallic (R), ambient occlusion (G) and smoothness (A, from 1 - roughness, remapped) from the ARM map for URP Lit; .gltf files have their texture/image references removed (materials are assigned in Unity).
+Poly Haven preview renders (_preview_thumb_512.png) are NOT included (not covered by CC0).

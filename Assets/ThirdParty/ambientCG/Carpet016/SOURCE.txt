@@ -1,0 +1,4 @@
+Source: https://ambientcg.com/view?id=Carpet016
+License: CC0 1.0 Universal, https://docs.ambientcg.com/license/ ("All ambientCG assets are provided under the Creative Commons CC0 1.0 Universal License.")
+Downloaded from ambientcg.com on 2026-10-28 (license page saved with the download manifest).
+Changes: resized to the listed resolution; *_Mask.png packs metallic (R), ambient occlusion (G) and smoothness (A, from 1 - roughness, remapped) for URP Lit.

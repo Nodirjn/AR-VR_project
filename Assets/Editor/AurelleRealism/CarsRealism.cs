@@ -1,0 +1,1000 @@
+#if UNITY_EDITOR
+// Aurelle realism pass: cars and car parts.
+//
+// Gives the hero CarConcept (and its exploded parts), the V6 engine, the three premium display cars and the
+// exterior traffic cars (same GLBs) realistic materials: clear-coated paint without the noisy flake normal map,
+// transparent tinted glass with preserved reflections, rubber tyres, metal rims and brake discs, chrome, gloss
+// and satin trims, leather interiors, lamp lenses and LED emission, and material zones on the V6 CAD export.
+//
+// Route: glTFast 6.20 has no material remapping for its ScriptedImporter, so this tool writes its own material
+// assets (Assets/Materials/Realism/Cars) and assigns them as overrides:
+//   * scene prefab instances of the GLBs (CarConcept, the premium collection loaders),
+//   * the unpacked V6 objects under CarConcept/V6_Engine_Prototype(Clone) (zone per CAD part name),
+//   * the traffic vehicle prefabs in Assets/Prefabs/ExteriorTraffic (nested GLB instances).
+// Every material keeps a glTFast shader graph (Shader Graphs/glTF-pbrMetallicRoughness[-Clearcoat]), so the
+// CarConcept's second-UV ambient occlusion and texture transforms keep working, no new shader is added to the
+// build, and the Car Explorer highlight (MaterialPropertyBlock on baseColorFactor) keeps working.
+// Source materials are identified through the GLB prefab (PrefabUtility.GetCorrespondingObjectFromOriginalSource),
+// never by fileID, so running the tool again re-applies the same materials and creates nothing new.
+//
+// It also replaces the uncompressed RGBA32 textures that glTFast imports from the premium GLBs (about 450 MB in a
+// player, 400 MB of it the E30's 2048 maps) with compressed 1K copies (Assets/Materials/Realism/Cars/Textures,
+// Android ASTC), and gives some traffic instances other factory paints so the street is not all red E30s.
+//
+// Entry points: menu Aurelle/Realism/Cars/Apply Car Materials, or batch -executeMethod CarsRealism.Batch.
+// Run it after any "Aurelle > Build Exterior District" regeneration: the builder re-creates the traffic prefabs
+// and the traffic instances.
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
+
+public static class CarsRealism
+{
+    public const string MaterialFolder = "Assets/Materials/Realism/Cars";
+    private const string ScenePath = "Assets/Scenes/SampleScene.unity";
+    private const string PbrShaderName = "Shader Graphs/glTF-pbrMetallicRoughness";
+    private const string CoatShaderName = "Shader Graphs/glTF-pbrMetallicRoughness-Clearcoat";
+    private const string PbrShaderGuid = "b9d29dfa1474148e792ac720cbd45122";
+    private const string CoatShaderGuid = "c18c97ae1ce021b4980c5d19a54f0d3c";
+
+    private const string ConceptGlb = "Assets/Models/CarConcept.glb";
+    private const string E30Glb = "Assets/Models/ShowroomCollection/BMW_M3_E30.glb";
+    private const string M4Glb = "Assets/Models/ShowroomCollection/BMW_M4_Competition.glb";
+    private const string TeslaGlb = "Assets/Models/ShowroomCollection/Tesla_Model_3_2018.glb";
+    private const string V6RootName = "V6_Engine_Prototype(Clone)";
+    private static readonly string[] TrafficPrefabs =
+    {
+        "Assets/Prefabs/ExteriorTraffic/TrafficVehicle_E30.prefab",
+        "Assets/Prefabs/ExteriorTraffic/TrafficVehicle_M4.prefab",
+        "Assets/Prefabs/ExteriorTraffic/TrafficVehicle_Tesla.prefab",
+    };
+
+    // ------------------------------------------------------------------------------------------------ entry points
+
+    [MenuItem("Aurelle/Realism/Cars/Apply Car Materials")]
+    public static void ApplyFromMenu()
+    {
+        Scene scene = SceneManager.GetActiveScene();
+        if (!scene.IsValid() || scene.path != ScenePath)
+        {
+            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
+            scene = EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+        }
+        string report = Apply();
+        EditorSceneManager.MarkSceneDirty(scene);
+        EditorSceneManager.SaveScene(scene);
+        AssetDatabase.SaveAssets();
+        Debug.Log(report);
+    }
+
+    [MenuItem("Aurelle/Realism/Cars/Report Car Materials")]
+    public static void ReportFromMenu()
+    {
+        Debug.Log(Describe());
+    }
+
+    /// <summary>Batch entry point: open SampleScene, apply, save scene and assets, exit when in batch mode.</summary>
+    public static void Batch()
+    {
+        int code = 0;
+        try
+        {
+            Scene scene = EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+            string report = Apply();
+            EditorSceneManager.MarkSceneDirty(scene);
+            if (!EditorSceneManager.SaveOpenScenes()) { Debug.LogError("CarsRealism: scene save failed"); code = 2; }
+            AssetDatabase.SaveAssets();
+            Debug.Log(report);
+        }
+        catch (Exception e)
+        {
+            Debug.LogException(e);
+            code = 1;
+        }
+        if (Application.isBatchMode) EditorApplication.Exit(code);
+    }
+
+    /// <summary>Creates or updates the materials and assigns them in the open SampleScene and the traffic prefabs.</summary>
+    public static string Apply()
+    {
+        var log = new StringBuilder("CarsRealism applied:\n");
+        var lib = new Library();
+        lib.Build();
+        log.AppendLine("  materials: " + lib.Count + " in " + MaterialFolder + "; compressed GLB texture copies: " + lib.TextureReport);
+
+        // Hero car (prefab instance of CarConcept.glb) and its V6 (unpacked scene objects).
+        GameObject concept = FindSceneRoot("CarConcept");
+        if (concept == null) throw new InvalidOperationException("CarConcept root not found in the open scene");
+        log.AppendLine("  CarConcept: " + AssignByGlb(concept.transform, lib, V6RootName) + " slots changed");
+        Transform v6 = FindChild(concept.transform, V6RootName);
+        log.AppendLine("  V6: " + (v6 != null ? AssignV6(v6, lib) + " slots changed" : "MISSING " + V6RootName));
+
+        // Premium collection: one prefab instance per display.
+        GameObject collection = FindSceneRoot("Showroom Premium Collection");
+        if (collection != null)
+            log.AppendLine("  Showroom Premium Collection: " + AssignByGlb(collection.transform, lib, null) + " slots changed");
+        else
+            log.AppendLine("  Showroom Premium Collection: MISSING");
+
+        // Traffic prefabs (instances in the scene follow the prefab assets).
+        foreach (string path in TrafficPrefabs)
+            log.AppendLine("  " + Path.GetFileName(path) + ": " + AssignPrefab(path, lib));
+
+        // Colour variety on the street: some traffic instances get another factory paint (scene overrides).
+        log.AppendLine("  traffic paint variety: " + AssignTrafficVariety(lib));
+
+        AssetDatabase.SaveAssets();
+        return log.ToString();
+    }
+
+    // ------------------------------------------------------------------------------------------------ assignment
+
+    private static GameObject FindSceneRoot(string name)
+    {
+        Scene scene = SceneManager.GetActiveScene();
+        foreach (GameObject go in scene.GetRootGameObjects())
+            if (go.name == name) return go;
+        return null;
+    }
+
+    private static Transform FindChild(Transform parent, string name)
+    {
+        for (int i = 0; i < parent.childCount; i++)
+            if (parent.GetChild(i).name == name) return parent.GetChild(i);
+        return null;
+    }
+
+    /// <summary>Assigns materials to every renderer under root whose source is one of the car GLBs.</summary>
+    private static int AssignByGlb(Transform root, Library lib, string skipChild)
+    {
+        int changed = 0;
+        foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>(true))
+        {
+            if (skipChild != null && IsUnder(renderer.transform, root, skipChild)) continue;
+            Material[] source = SourceMaterials(renderer, out string glb);
+            if (source == null) continue;
+            Material[] current = renderer.sharedMaterials;
+            if (current.Length != source.Length) continue;
+            var next = (Material[])current.Clone();
+            bool dirty = false;
+            for (int i = 0; i < source.Length; i++)
+            {
+                Material target = lib.ForGlbSlot(glb, source[i], renderer);
+                if (target == null) target = source[i]; // not managed: keep (or restore) the imported material
+                if (next[i] != target) { next[i] = target; dirty = true; changed++; }
+            }
+            if (!dirty) continue;
+            Undo.RecordObject(renderer, "Apply car materials");
+            renderer.sharedMaterials = next;
+            if (PrefabUtility.IsPartOfPrefabInstance(renderer))
+                PrefabUtility.RecordPrefabInstancePropertyModifications(renderer);
+        }
+        return changed;
+    }
+
+    private static bool IsUnder(Transform t, Transform root, string childName)
+    {
+        while (t != null && t != root)
+        {
+            if (t.parent == root && t.name == childName) return true;
+            t = t.parent;
+        }
+        return false;
+    }
+
+    /// <summary>The imported (GLB) materials of the renderer's source object, and the GLB path.</summary>
+    private static Material[] SourceMaterials(Renderer renderer, out string glb)
+    {
+        glb = null;
+        if (!PrefabUtility.IsPartOfPrefabInstance(renderer)) return null;
+        Renderer source = PrefabUtility.GetCorrespondingObjectFromOriginalSource(renderer);
+        if (source == null) return null;
+        glb = AssetDatabase.GetAssetPath(source);
+        if (glb != ConceptGlb && glb != E30Glb && glb != M4Glb && glb != TeslaGlb) return null;
+        return source.sharedMaterials;
+    }
+
+    private static int AssignV6(Transform v6, Library lib)
+    {
+        int changed = 0;
+        foreach (Renderer renderer in v6.GetComponentsInChildren<Renderer>(true))
+        {
+            Material target = lib.ForV6Part(renderer.name);
+            if (target == null) continue;
+            Material[] current = renderer.sharedMaterials;
+            bool dirty = false;
+            for (int i = 0; i < current.Length; i++)
+            {
+                if (current[i] != target) { current[i] = target; dirty = true; changed++; }
+            }
+            if (!dirty) continue;
+            Undo.RecordObject(renderer, "Apply V6 materials");
+            renderer.sharedMaterials = current;
+        }
+        return changed;
+    }
+
+    private static string AssignPrefab(string path, Library lib)
+    {
+        if (AssetDatabase.LoadAssetAtPath<GameObject>(path) == null) return "missing (skipped)";
+        GameObject root = PrefabUtility.LoadPrefabContents(path);
+        try
+        {
+            int changed = AssignByGlb(root.transform, lib, null);
+            if (changed > 0) PrefabUtility.SaveAsPrefabAsset(root, path);
+            return changed + " slots changed";
+        }
+        finally
+        {
+            PrefabUtility.UnloadPrefabContents(root);
+        }
+    }
+
+    /// <summary>
+    /// Gives the traffic vehicle instances in the scene a deterministic mix of factory paints: E30s red, blue,
+    /// black, silver; Teslas white, midnight silver, blue (the M4 keeps Alpine White: its livery is a texture).
+    /// Instances that keep the default paint have their material override reverted, so re-running is stable.
+    /// </summary>
+    private static string AssignTrafficVariety(Library lib)
+    {
+        var instances = new List<GameObject>();
+        foreach (GameObject root in SceneManager.GetActiveScene().GetRootGameObjects())
+        {
+            foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (!PrefabUtility.IsOutermostPrefabInstanceRoot(t.gameObject)) continue;
+                if (Array.IndexOf(TrafficPrefabs, PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(t.gameObject)) >= 0)
+                    instances.Add(t.gameObject);
+            }
+        }
+        instances = instances.OrderBy(g => PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(g), StringComparer.Ordinal)
+            .ThenBy(g => HierarchyKey(g.transform), StringComparer.Ordinal).ToList();
+        var counters = new Dictionary<string, int>();
+        int changed = 0, reverted = 0;
+        foreach (GameObject instance in instances)
+        {
+            string prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(instance);
+            counters.TryGetValue(prefabPath, out int index);
+            counters[prefabPath] = index + 1;
+            foreach (Renderer renderer in instance.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] source = SourceMaterials(renderer, out string glb);
+                Renderer prefabRenderer = PrefabUtility.GetCorrespondingObjectFromSource(renderer);
+                if (source == null || prefabRenderer == null) continue;
+                Material[] prefabMaterials = prefabRenderer.sharedMaterials;
+                if (prefabMaterials.Length != source.Length) continue;
+                var desired = (Material[])prefabMaterials.Clone();
+                for (int i = 0; i < source.Length; i++)
+                {
+                    Material variant = source[i] != null ? lib.TrafficVariant(glb, source[i].name, index) : null;
+                    if (variant != null) desired[i] = variant;
+                }
+                var so = new SerializedObject(renderer);
+                SerializedProperty prop = so.FindProperty("m_Materials");
+                if (desired.SequenceEqual(prefabMaterials))
+                {
+                    if (prop != null && prop.prefabOverride)
+                    {
+                        PrefabUtility.RevertPropertyOverride(prop, InteractionMode.AutomatedAction);
+                        reverted++;
+                    }
+                    continue;
+                }
+                if (renderer.sharedMaterials.SequenceEqual(desired)) continue;
+                Undo.RecordObject(renderer, "Traffic paint variety");
+                renderer.sharedMaterials = desired;
+                PrefabUtility.RecordPrefabInstancePropertyModifications(renderer);
+                changed++;
+            }
+        }
+        return instances.Count + " instances, " + changed + " renderers repainted, " + reverted + " overrides reverted";
+    }
+
+    private static string HierarchyKey(Transform t)
+    {
+        var parts = new List<string>();
+        for (; t != null; t = t.parent) parts.Add(t.GetSiblingIndex().ToString("D5") + t.name);
+        parts.Reverse();
+        return string.Join("/", parts);
+    }
+
+    // ------------------------------------------------------------------------------------------------ reporting
+
+    public static string Describe()
+    {
+        var sb = new StringBuilder();
+        string[] guids = AssetDatabase.FindAssets("t:Material", new[] { MaterialFolder });
+        sb.AppendLine("Car materials in " + MaterialFolder + ": " + guids.Length);
+        foreach (string guid in guids.OrderBy(g => AssetDatabase.GUIDToAssetPath(g)))
+        {
+            var m = AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GUIDToAssetPath(guid));
+            sb.AppendLine("  " + m.name + " shader=" + m.shader.name + " queue=" + m.renderQueue + " kw=[" + string.Join(" ", m.shaderKeywords) + "]");
+        }
+        return sb.ToString();
+    }
+
+    // ================================================================================================ materials
+
+    private enum Surface { Opaque, Glass }
+
+    /// <summary>One material recipe. Colours are sRGB; emission is linear colour times intensity.</summary>
+    private sealed class Spec
+    {
+        public string Name;
+        public bool Coat;                    // clear coat shader graph
+        public string TemplateGlb;           // copy textures, transforms and keywords from this GLB material
+        public string TemplateName;
+        public Color? Base;                  // baseColorFactor (sRGB, alpha = opacity for glass)
+        public float Metal = 0f, Rough = 0.5f;
+        public float CoatAmount = 1f, CoatRough = 0.03f;
+        public float? Occlusion;             // occlusionTexture_strength (template AO only)
+        public float? NormalScale;
+        public Color Emission = Color.black; // linear
+        public float EmissionIntensity = 0f;
+        public bool KeepTemplateEmission;    // keep the template's emissive texture/factor (scaled by EmissionScale)
+        public float EmissionScale = 1f;
+        public bool DropBaseTexture, DropNormal, DropMetalRough = true, DropOcclusion;
+        public Surface Surface = Surface.Opaque;
+        public int? Cull;                    // 0 off, 2 back; null keeps template (or back)
+        public bool CastShadows = true;
+        public bool KeepTemplate;            // exact copy of the template (factors, surface, keywords); only textures are swapped
+        public int AndroidMax = 1024;        // Android max size for textures baked from this material's GLB textures
+    }
+
+    /// <summary>Builds every material once and answers the slot mappings.</summary>
+    private sealed class Library
+    {
+        private readonly Dictionary<string, Material> byName = new Dictionary<string, Material>();
+        private readonly Dictionary<string, Dictionary<string, Material>> glbMaterials = new Dictionary<string, Dictionary<string, Material>>();
+        private readonly TextureBaker baker = new TextureBaker();
+        private Shader pbr, coat;
+
+        public int Count => byName.Count;
+        public string TextureReport => baker.Report;
+
+        public void Build()
+        {
+            pbr = LoadShader(PbrShaderGuid, PbrShaderName);
+            coat = LoadShader(CoatShaderGuid, CoatShaderName);
+            EnsureFolder(MaterialFolder);
+            foreach (Spec spec in Specs())
+                byName[spec.Name] = Create(spec);
+            // Every other textured material of the premium GLBs becomes an exact copy with compressed textures, so
+            // no uncompressed GLB texture is left in a build (palette and 4x4 swatches stay on the imports).
+            foreach (string glb in new[] { E30Glb, M4Glb, TeslaGlb })
+            {
+                foreach (Material source in AllGlbMaterials(glb))
+                {
+                    if (ExplicitGlbSlot(glb, source.name, null) != null || !HasLargeTexture(source)) continue;
+                    var spec = new Spec { Name = "Car_" + BakeFolder(glb) + "_Import_" + Sanitize(source.name), TemplateGlb = glb, TemplateName = source.name, KeepTemplate = true };
+                    byName[spec.Name] = Create(spec);
+                    autoCopies[glb + "|" + source.name] = byName[spec.Name];
+                }
+            }
+        }
+
+        private readonly Dictionary<string, Material> autoCopies = new Dictionary<string, Material>();
+
+        private IEnumerable<Material> AllGlbMaterials(string glb)
+        {
+            GlbMaterial(glb, "");
+            return glbMaterials[glb].Values.OrderBy(m => m.name, StringComparer.Ordinal).ToList();
+        }
+
+        private static bool HasLargeTexture(Material m)
+        {
+            foreach (string prop in m.GetTexturePropertyNames())
+            {
+                Texture t = m.GetTexture(prop);
+                if (t != null && Mathf.Max(t.width, t.height) >= 128 && AssetDatabase.GetAssetPath(t).EndsWith(".glb", StringComparison.Ordinal)) return true;
+            }
+            return false;
+        }
+
+        private static string Sanitize(string name)
+        {
+            var sb = new StringBuilder();
+            foreach (char c in name) sb.Append(char.IsLetterOrDigit(c) ? c : '_');
+            return sb.ToString();
+        }
+
+        private static Shader LoadShader(string guid, string name)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            Shader shader = !string.IsNullOrEmpty(path) ? AssetDatabase.LoadAssetAtPath<Shader>(path) : null;
+            if (shader == null) shader = Shader.Find(name);
+            if (shader == null) throw new InvalidOperationException("glTFast shader graph not found: " + name);
+            return shader;
+        }
+
+        private static void EnsureFolder(string folder)
+        {
+            if (AssetDatabase.IsValidFolder(folder)) return;
+            string parent = Path.GetDirectoryName(folder).Replace('\\', '/');
+            EnsureFolder(parent);
+            AssetDatabase.CreateFolder(parent, Path.GetFileName(folder));
+        }
+
+        public Material Get(string name)
+        {
+            if (!byName.TryGetValue(name, out Material m)) throw new KeyNotFoundException("car material spec missing: " + name);
+            return m;
+        }
+
+        private Material GlbMaterial(string glb, string name)
+        {
+            if (!glbMaterials.TryGetValue(glb, out var map))
+            {
+                map = new Dictionary<string, Material>();
+                foreach (UnityEngine.Object o in AssetDatabase.LoadAllAssetsAtPath(glb))
+                    if (o is Material m && !map.ContainsKey(m.name)) map[m.name] = m;
+                glbMaterials[glb] = map;
+            }
+            map.TryGetValue(name, out Material found);
+            return found;
+        }
+
+        private Material Create(Spec s)
+        {
+            string path = MaterialFolder + "/" + s.Name + ".mat";
+            Shader shader = s.Coat ? coat : pbr;
+            Material template = s.TemplateGlb != null ? GlbMaterial(s.TemplateGlb, s.TemplateName) : null;
+            if (s.TemplateGlb != null && template == null)
+                throw new InvalidOperationException("template material '" + s.TemplateName + "' not found in " + s.TemplateGlb);
+
+            if (s.KeepTemplate) return CreateFromTemplate(s, template, path);
+
+            Material mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+            bool created = mat == null;
+            if (created) mat = new Material(shader) { name = s.Name };
+            mat.shader = shader;
+            // Start from a clean state every run so values never accumulate.
+            mat.shaderKeywords = new string[0];
+            Material defaults = new Material(shader);
+            mat.CopyPropertiesFromMaterial(defaults);
+            UnityEngine.Object.DestroyImmediate(defaults);
+            if (template != null) mat.CopyMatchingPropertiesFromMaterial(template);
+
+            bool hasOcclusion = template != null && !s.DropOcclusion && mat.GetTexture("occlusionTexture") != null;
+            bool hasTransform = false;
+            if (template != null)
+            {
+                if (s.DropBaseTexture) mat.SetTexture("baseColorTexture", null);
+                if (s.DropNormal) mat.SetTexture("normalTexture", null);
+                if (s.DropMetalRough) mat.SetTexture("metallicRoughnessTexture", null);
+                if (s.DropOcclusion) mat.SetTexture("occlusionTexture", null);
+                foreach (string tex in new[] { "baseColorTexture", "normalTexture", "occlusionTexture", "metallicRoughnessTexture", "emissiveTexture" })
+                {
+                    if (mat.GetTexture(tex) == null) continue;
+                    Vector4 st = mat.GetVector(tex + "_ST");
+                    Vector4 rot = mat.HasProperty(tex + "_Rotation") ? mat.GetVector(tex + "_Rotation") : Vector4.zero;
+                    if (st != new Vector4(1, 1, 0, 0) || rot != Vector4.zero) hasTransform = true;
+                }
+            }
+            else
+            {
+                foreach (string tex in new[] { "baseColorTexture", "normalTexture", "occlusionTexture", "metallicRoughnessTexture", "emissiveTexture" })
+                    mat.SetTexture(tex, null);
+            }
+
+            if (BakeFolder(s.TemplateGlb) != null) baker.Swap(mat, s.TemplateGlb, BakeFolder(s.TemplateGlb), s.AndroidMax);
+
+            if (s.Base.HasValue) mat.SetColor("baseColorFactor", s.Base.Value);
+            mat.SetFloat("metallicFactor", s.Metal);
+            mat.SetFloat("roughnessFactor", s.Rough);
+            if (s.NormalScale.HasValue) mat.SetFloat("normalTexture_scale", s.NormalScale.Value);
+            if (hasOcclusion) mat.SetFloat("occlusionTexture_strength", s.Occlusion ?? 1f);
+            if (s.Coat)
+            {
+                mat.SetFloat("clearcoatFactor", s.CoatAmount);
+                mat.SetFloat("clearcoatRoughnessFactor", s.CoatRough);
+                mat.SetTexture("clearcoatTexture", null);
+                mat.SetTexture("clearcoatRoughnessTexture", null);
+            }
+
+            // Emission
+            bool emissive;
+            if (s.KeepTemplateEmission && template != null && template.IsKeywordEnabled("_EMISSIVE"))
+            {
+                Color e = template.GetColor("emissiveFactor").linear * s.EmissionScale;
+                mat.SetColor("emissiveFactor", e.gamma);
+                emissive = s.EmissionScale > 0f;
+            }
+            else
+            {
+                mat.SetTexture("emissiveTexture", null);
+                Color e = s.Emission * s.EmissionIntensity;
+                mat.SetColor("emissiveFactor", e.gamma);
+                emissive = s.EmissionIntensity > 0f && s.Emission.maxColorComponent > 0f;
+            }
+            if (!emissive) { mat.SetColor("emissiveFactor", Color.black); mat.SetTexture("emissiveTexture", null); }
+
+            // Keywords (glTFast graph keywords are material-local)
+            SetKeyword(mat, "_EMISSIVE", emissive);
+            SetKeyword(mat, "_OCCLUSION", hasOcclusion);
+            SetKeyword(mat, "_TEXTURE_TRANSFORM", hasTransform);
+            SetKeyword(mat, "_CLEARCOAT", s.Coat && s.CoatAmount > 0f);
+
+            // Surface
+            mat.SetFloat("alphaCutoff", 0f);
+            mat.SetFloat("_AlphaClip", 0f);
+            mat.SetFloat("_QueueControl", 0f); // automatic queue from the surface type
+            int cull = s.Cull ?? (template != null ? (int)template.GetFloat("_Cull") : 2);
+            if (s.Surface == Surface.Glass)
+            {
+                mat.SetFloat("_Surface", 1f);
+                mat.SetFloat("_Blend", 0f);                    // alpha
+                mat.SetFloat("_BlendModePreserveSpecular", 1f); // reflections stay at full strength
+                mat.SetFloat("_ZWrite", 0f);
+                mat.SetFloat("_ZWriteControl", 0f);
+            }
+            else
+            {
+                mat.SetFloat("_Surface", 0f);
+                mat.SetFloat("_Blend", 0f);
+                mat.SetFloat("_BlendModePreserveSpecular", 0f);
+                mat.SetFloat("_ZWrite", 1f);
+            }
+            mat.SetFloat("_Cull", cull);
+            mat.SetFloat("_CastShadows", s.CastShadows ? 1f : 0f);
+            mat.SetFloat("_ReceiveShadows", 1f);
+            BaseShaderGUI.SetupMaterialBlendMode(mat);
+            mat.SetShaderPassEnabled("ShadowCaster", s.CastShadows);
+            mat.SetShaderPassEnabled("MOTIONVECTORS", false);
+            mat.doubleSidedGI = true;
+            mat.globalIlluminationFlags = emissive ? MaterialGlobalIlluminationFlags.RealtimeEmissive : MaterialGlobalIlluminationFlags.EmissiveIsBlack;
+            mat.enableInstancing = false;
+
+            if (created) AssetDatabase.CreateAsset(mat, path);
+            else EditorUtility.SetDirty(mat);
+            return mat;
+        }
+
+        private static readonly string[] KnownPasses = { "ShadowCaster", "DepthOnly", "DepthNormals", "DepthNormalsOnly", "MOTIONVECTORS", "Meta", "Universal2D", "GBuffer", "XRMotionVectors" };
+
+        /// <summary>A faithful copy of an imported material whose only change is compressed, size-limited textures.</summary>
+        private Material CreateFromTemplate(Spec s, Material template, string path)
+        {
+            Material mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+            bool created = mat == null;
+            if (created) mat = new Material(template) { name = s.Name };
+            mat.shader = template.shader;
+            mat.shaderKeywords = new string[0];
+            mat.CopyPropertiesFromMaterial(template);
+            mat.SetFloat("_QueueControl", 1f); // user override: keep the imported render queue (stable across runs)
+            mat.renderQueue = template.renderQueue;
+            mat.SetOverrideTag("RenderType", template.GetTag("RenderType", false, ""));
+            foreach (string pass in KnownPasses) mat.SetShaderPassEnabled(pass, template.GetShaderPassEnabled(pass));
+            mat.globalIlluminationFlags = template.globalIlluminationFlags;
+            mat.doubleSidedGI = template.doubleSidedGI;
+            mat.enableInstancing = template.enableInstancing;
+            if (BakeFolder(s.TemplateGlb) != null) baker.Swap(mat, s.TemplateGlb, BakeFolder(s.TemplateGlb), s.AndroidMax);
+            if (created) AssetDatabase.CreateAsset(mat, path);
+            else EditorUtility.SetDirty(mat);
+            return mat;
+        }
+
+        private static void SetKeyword(Material m, string keyword, bool on)
+        {
+            if (on) m.EnableKeyword(keyword); else m.DisableKeyword(keyword);
+        }
+
+        // ------------------------------------------------------------------ slot mapping
+
+        /// <summary>The managed material for one slot whose imported material is source, or null to keep the import.</summary>
+        public Material ForGlbSlot(string glb, Material source, Renderer renderer)
+        {
+            if (source == null) return null;
+            Material explicitTarget = ExplicitGlbSlot(glb, source.name, renderer != null ? renderer.name : null);
+            if (explicitTarget != null) return explicitTarget;
+            autoCopies.TryGetValue(glb + "|" + source.name, out Material copy);
+            return copy;
+        }
+
+        private Material ExplicitGlbSlot(string glb, string n, string rendererName)
+        {
+            switch (glb)
+            {
+                case ConceptGlb: return Concept(n);
+                case E30Glb: return E30(n, rendererName);
+                case M4Glb: return M4(n);
+                case TeslaGlb: return Tesla(n);
+            }
+            return null;
+        }
+
+        private Material Concept(string n)
+        {
+            switch (n)
+            {
+                case "Paint 1 Carmine": return Get("Car_Concept_Paint_Carmine");
+                case "Paint 2 Carmine": return Get("Car_Concept_Paint_GlossBlack");
+                case "Glass": return Get("Car_Glass_Tinted");
+                case "": return Get("Car_Concept_Trim_SatinBlack");
+                case "Interior 1": return Get("Car_Concept_Leather_Black");
+                case "Interior 2": return Get("Car_Concept_Alcantara_Black");
+                case "Interior 3 Carmine": return Get("Car_Concept_Leather_Carmine");
+                case "Panel Sides": return Get("Car_Concept_Plastic_Black");
+                case "Floormat": return Get("Car_Concept_Carpet");
+                case "Hardware": return Get("Car_Concept_Aluminium_Brushed");
+                case "Mechanical": return Get("Car_Concept_Mechanical");
+                case "Dashboard": return Get("Car_Concept_Dashboard");
+                case "License": return Get("Car_Concept_LicensePlate");
+                case "Headlight": return Get("Car_Concept_Headlight_LED");
+                case "Brakelight": return Get("Car_Concept_Taillight");
+                case "Signallight": return Get("Car_Concept_Indicator");
+                case "Mirror": return Get("Car_Mirror_Glass");
+                case "Brake": return Get("Car_Concept_Caliper_Red");
+                case "Disc": return Get("Car_Concept_BrakeDisc");
+                case "Tireside": return Get("Car_Concept_Tyre_Sidewall");
+                case "Tiretread": return Get("Car_Concept_Tyre_Tread");
+                case "Rim1": return Get("Car_Concept_Rim_Gunmetal");
+                case "Rim2": return Get("Car_Concept_Rim_Machined");
+            }
+            return null;
+        }
+
+        private Material E30(string n, string rendererName)
+        {
+            switch (n)
+            {
+                case "BMW_E30_M3_PAINT": return Get("Car_E30_Paint_Red");
+                case "BMW_E30_M3_TIRE": return Get("Car_E30_Tyre");
+                case "BMW_E30_M3_RIM": return Get("Car_E30_Rim");
+                case "Brake_Disc": return Get("Car_E30_BrakeDisc");
+                case "Brembo_Calipers": return Get("Car_E30_Caliper");
+                case "BMW_E30_M3_LENS": return Get("Car_E30_Lens");
+                case "BMW_E30_M3_EMBLEMS": return Get("Car_E30_Emblems");
+                case "BMW_E30_M3_TAILLIGHT_REFLECTOR": return Get("Car_E30_TaillightReflector");
+                // PaletteMaterial002 is the transparent palette: the greenhouse mesh is glass, the caliper logo
+                // planes keep the imported material.
+                case "PaletteMaterial002": return rendererName == "Object_7" || rendererName == null ? Get("Car_Glass_Tinted") : null;
+            }
+            return null;
+        }
+
+        private Material M4(string n)
+        {
+            switch (n)
+            {
+                case "Mesheszx1Mtl": return Get("Car_M4_Paint_White");
+                case "Mesheslivery1Mtl": return Get("Car_M4_Paint_Livery");
+                case "Meshesbody151Mtl": return Get("Car_M4_Carbon");
+                case "Meshespillars1Mtl": return Get("Car_Trim_GlossBlack");
+                case "Meshesblack161Mtl": return Get("Car_Trim_GlossBlack");
+                case "Mesheswindows1Mtl": return Get("Car_Glass_Tinted");
+                case "Meshesheadlight51Mtl": return Get("Car_Lens_Smoked");
+                case "Meshesredlight1Mtl": return Get("Car_Taillight_Red");
+                case "Meshesm8rim1Mtl": return Get("Car_M4_Rim");
+                case "Meshesm8rim0011Mtl": return Get("Car_M4_Tyre");
+                case "Caliper1Mtl": return Get("Car_M4_Caliper_Gold");
+                case "Mesheschrome51Mtl": return Get("Car_Chrome");
+                case "Meshespiggrill1Mtl": return Get("Car_M4_Grille");
+                case "Mesheslight51Mtl": return Get("Car_M4_LampInternals");
+                case "Meshesled11Mtl": return Get("Car_M4_LampInternals_Led");
+                case "Meshesled111Mtl": return Get("Car_M4_LampInternals_Led2");
+                case "Mesheslogo11Mtl": return Get("Car_M4_Badge_Front");
+                case "Mesheslogo31Mtl": return Get("Car_M4_Badge_Rear");
+                case "Meshesff41Mtl": return Get("Car_M4_Trim_Atlas");
+                case "Meshesengine51Mtl": return Get("Car_M4_Trim_Atlas_Engine");
+                case "Meshesblack151Mtl": return Get("Car_M4_Trim_Atlas_Black");
+                case "Meshestail71Mtl": return Get("Car_Trim_SatinBlack");
+                case "Meshesinterior71Mtl": return Get("Car_M4_Interior_Leather");
+                case "Meshesdash11Mtl": return Get("Car_M4_Interior_Dash");
+            }
+            return null;
+        }
+
+        private Material Tesla(string n)
+        {
+            switch (n)
+            {
+                case "PaletteMaterial002": return Get("Car_Tesla_Paint_PearlWhite");
+                case "primary.001": return Get("Car_Tesla_Paint_Sills");
+                case "primary.002": return Get("Car_Tesla_Paint_DoorFrames");
+                case "glass.0": return Get("Car_Glass_Tinted");
+                case "glass.1": return Get("Car_Glass_Roof");
+                case "dvorright.0": return Get("Car_Trim_GlossBlack");
+                case "movsteer_1.0.1": return Get("Car_Chrome_Satin");
+                case "back_chrome_light.0": return Get("Car_Chrome");
+                case "aluminium_light.0": return Get("Car_Chrome_Satin");
+                case "PaletteMaterial004": return Get("Car_Mirror_Glass");
+                case "wheels.6": return Get("Car_Tesla_Rim");
+                case "wheels.2": return Get("Car_Tesla_Tyre");
+                case "wheels.4": return Get("Car_Tesla_BrakeDisc");
+                case "tembus_red.0": return Get("Car_Tesla_Lens");
+                case "Putih.0": return Get("Car_Tesla_Leather_White");
+                case "movsteer_1.0.0": return Get("Car_Tesla_Interior_Dark");
+            }
+            return null;
+        }
+
+        /// <summary>Paint variant for a traffic instance slot, or null to keep the prefab material.</summary>
+        public Material TrafficVariant(string glb, string sourceName, int index)
+        {
+            if (glb == E30Glb && sourceName == "BMW_E30_M3_PAINT")
+            {
+                switch (index % 4)
+                {
+                    case 1: return Get("Car_Traffic_E30_Paint_DeepBlue");
+                    case 2: return Get("Car_Traffic_E30_Paint_Black");
+                    case 3: return Get("Car_Traffic_E30_Paint_Silver");
+                }
+            }
+            if (glb == TeslaGlb && (sourceName == "PaletteMaterial002" || sourceName == "primary.001" || sourceName == "primary.002"))
+            {
+                switch (index % 3)
+                {
+                    case 1: return Get("Car_Traffic_Tesla_Paint_MidnightSilver");
+                    case 2: return Get("Car_Traffic_Tesla_Paint_DeepBlue");
+                }
+            }
+            return null;
+        }
+
+        /// <summary>V6 material zone by CAD part name (the explorer's own part names).</summary>
+        public Material ForV6Part(string part)
+        {
+            string p = part.ToLowerInvariant();
+            if (p.StartsWith("valve cover")) return Get("Car_V6_ValveCover_Black");
+            if (p.StartsWith("engine block") || p.StartsWith("engine cylinder head") || p.StartsWith("engine side cover") || p.StartsWith("oil pan"))
+                return Get("Car_V6_CastAluminium");
+            if (p.StartsWith("intake manifold mirored002") || p.StartsWith("intake manifold mirored003"))
+                return Get("Car_V6_CastAluminium");
+            if (p.StartsWith("intake manifold")) return Get("Car_V6_PolishedAluminium");
+            if (p.StartsWith("air turbo (supercharger)001") || p.StartsWith("air turbo (supercharger)004"))
+                return Get("Car_V6_MachinedSteel");
+            if (p.StartsWith("air turbo")) return Get("Car_V6_CastAluminium");
+            if (p.StartsWith("exhaust manifold")) return Get("Car_V6_ExhaustIron");
+            if (p.StartsWith("rocker arm backing spring") || p.StartsWith("hex screw") || p.StartsWith("cam shaft retainer") ||
+                p.StartsWith("engine belt wheels"))
+                return Get("Car_V6_DarkSteel");
+            if (p.StartsWith("piston head")) return Get("Car_V6_PolishedAluminium");
+            if (p.StartsWith("crankshaft") || p.StartsWith("cam") || p.StartsWith("piston") || p.StartsWith("engine valve") ||
+                p.StartsWith("rocker arm"))
+                return Get("Car_V6_MachinedSteel");
+            if (p.StartsWith("horse")) return Get("Car_V6_Rubber_Hose");
+            // Cone filters: pleated element, aluminium inlet flange, black end cap.
+            if (p == "engine air filter" || p == "engine air filter004") return Get("Car_V6_AirFilter_Element");
+            if (p == "engine air filter001" || p == "engine air filter005") return Get("Car_V6_PolishedAluminium");
+            if (p.StartsWith("engine air filter")) return Get("Car_V6_AirFilter_Housing");
+            return Get("Car_V6_CastAluminium");
+        }
+    }
+
+    /// <summary>Folder name for compressed copies of a GLB's textures, or null when its textures are kept.</summary>
+    private static string BakeFolder(string glb)
+    {
+        switch (glb)
+        {
+            case E30Glb: return "E30";
+            case M4Glb: return "M4";
+            case TeslaGlb: return "Tesla";
+        }
+        return null; // CarConcept textures are KTX2 (already block compressed)
+    }
+
+    // ------------------------------------------------------------------------------------------------ textures
+
+    /// <summary>
+    /// glTFast imports the PNG textures of the premium GLBs as uncompressed RGBA32 sub-assets on every platform
+    /// (the E30 alone: eighteen 2048 maps, about 22 MB each in a player, roughly 400 MB). Every such texture a car
+    /// material uses is copied once to Assets/Materials/Realism/Cars/Textures/&lt;car&gt; at no more than 1024 (colour as
+    /// JPG, colour with alpha, data and normal maps as PNG) and imported with platform compression (Standalone
+    /// 1024 BC7, Android ASTC 6x6 at 1024 or 512). Existing files are reused, so the copies and their GUIDs are
+    /// made only once; the CarConcept textures are KTX2 (already block compressed) and stay on the import.
+    /// </summary>
+    private sealed class TextureBaker
+    {
+        private enum Kind { Color, Data, Normal }
+        private const int MaxSize = 1024;
+        private static readonly string[] Props = { "baseColorTexture", "emissiveTexture", "normalTexture", "metallicRoughnessTexture", "occlusionTexture" };
+        private readonly Dictionary<string, Texture2D> cache = new Dictionary<string, Texture2D>();
+        private int baked, reused;
+
+        public string Report => baked + " baked, " + reused + " reused";
+
+        public void Swap(Material mat, string glb, string folderName, int androidMax)
+        {
+            foreach (string prop in Props)
+            {
+                if (!mat.HasProperty(prop)) continue;
+                var tex = mat.GetTexture(prop) as Texture2D;
+                if (tex == null || AssetDatabase.GetAssetPath(tex) != glb) continue;
+                Kind kind = prop == "normalTexture" ? Kind.Normal : (prop == "baseColorTexture" || prop == "emissiveTexture") ? Kind.Color : Kind.Data;
+                Texture2D copy = Get(tex, kind, folderName, androidMax);
+                if (copy != null) mat.SetTexture(prop, copy);
+            }
+        }
+
+        private Texture2D Get(Texture2D src, Kind kind, string folderName, int androidMax)
+        {
+            string folder = MaterialFolder + "/Textures/" + folderName;
+            string stem = folder + "/" + folderName + "_" + src.name + "_" + kind.ToString().ToLowerInvariant();
+            if (cache.TryGetValue(stem, out Texture2D cached)) return cached;
+            string path = new[] { ".png", ".jpg" }.Select(e => stem + e).FirstOrDefault(File.Exists);
+            if (path == null)
+            {
+                EnsureFolder(folder);
+                int w = Mathf.Min(src.width, MaxSize), h = Mathf.Max(1, src.height * w / src.width);
+                RenderTexture rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32,
+                    kind == Kind.Color ? RenderTextureReadWrite.sRGB : RenderTextureReadWrite.Linear);
+                RenderTexture previous = RenderTexture.active;
+                Graphics.Blit(src, rt);
+                RenderTexture.active = rt;
+                var read = new Texture2D(w, h, TextureFormat.RGBA32, false, kind != Kind.Color);
+                read.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                read.Apply();
+                RenderTexture.active = previous;
+                RenderTexture.ReleaseTemporary(rt);
+                bool alpha = kind == Kind.Color && read.GetPixels32().Any(c => c.a < 250);
+                bool jpg = kind == Kind.Color && !alpha;
+                path = stem + (jpg ? ".jpg" : ".png");
+                File.WriteAllBytes(path, jpg ? read.EncodeToJPG(95) : read.EncodeToPNG());
+                UnityEngine.Object.DestroyImmediate(read);
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+                baked++;
+            }
+            else reused++;
+            Configure(path, kind, androidMax);
+            Texture2D result = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+            cache[stem] = result;
+            return result;
+        }
+
+        private static void Configure(string path, Kind kind, int androidMax)
+        {
+            var ti = AssetImporter.GetAtPath(path) as TextureImporter;
+            if (ti == null) return;
+            bool alpha = kind == Kind.Color && path.EndsWith(".png", StringComparison.Ordinal);
+            bool dirty = false;
+            var type = kind == Kind.Normal ? TextureImporterType.NormalMap : TextureImporterType.Default;
+            if (ti.textureType != type) { ti.textureType = type; dirty = true; }
+            if (ti.sRGBTexture != (kind == Kind.Color)) { ti.sRGBTexture = kind == Kind.Color; dirty = true; }
+            var alphaSource = alpha ? TextureImporterAlphaSource.FromInput : TextureImporterAlphaSource.None;
+            if (ti.alphaSource != alphaSource) { ti.alphaSource = alphaSource; dirty = true; }
+            if (!ti.mipmapEnabled) { ti.mipmapEnabled = true; dirty = true; }
+            if (ti.anisoLevel != 4) { ti.anisoLevel = 4; dirty = true; }
+            if (ti.maxTextureSize != MaxSize) { ti.maxTextureSize = MaxSize; dirty = true; }
+            if (ti.textureCompression != TextureImporterCompression.CompressedHQ) { ti.textureCompression = TextureImporterCompression.CompressedHQ; dirty = true; }
+            TextureImporterPlatformSettings standalone = ti.GetPlatformTextureSettings("Standalone");
+            if (!standalone.overridden || standalone.maxTextureSize != MaxSize || standalone.format != TextureImporterFormat.Automatic ||
+                standalone.textureCompression != TextureImporterCompression.CompressedHQ)
+            {
+                standalone.overridden = true;
+                standalone.maxTextureSize = MaxSize;
+                standalone.format = TextureImporterFormat.Automatic;
+                standalone.textureCompression = TextureImporterCompression.CompressedHQ;
+                ti.SetPlatformTextureSettings(standalone);
+                dirty = true;
+            }
+            TextureImporterPlatformSettings android = ti.GetPlatformTextureSettings("Android");
+            if (!android.overridden || android.maxTextureSize != androidMax || android.format != TextureImporterFormat.ASTC_6x6)
+            {
+                android.overridden = true;
+                android.maxTextureSize = androidMax;
+                android.format = TextureImporterFormat.ASTC_6x6;
+                ti.SetPlatformTextureSettings(android);
+                dirty = true;
+            }
+            if (dirty) ti.SaveAndReimport();
+        }
+
+        private static void EnsureFolder(string folder)
+        {
+            if (AssetDatabase.IsValidFolder(folder)) return;
+            string parent = Path.GetDirectoryName(folder).Replace('\\', '/');
+            EnsureFolder(parent);
+            AssetDatabase.CreateFolder(parent, Path.GetFileName(folder));
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------ recipes
+
+    private static Color S(float r, float g, float b, float a = 1f) => new Color(r, g, b, a);
+
+    private static IEnumerable<Spec> Specs()
+    {
+        // ---- shared
+        yield return new Spec { Name = "Car_Glass_Tinted", Base = S(0.06f, 0.08f, 0.08f, 0.4f), Metal = 0f, Rough = 0.03f, Surface = Surface.Glass, Cull = 2, CastShadows = false };
+        yield return new Spec { Name = "Car_Glass_Roof", Base = S(0.03f, 0.035f, 0.04f, 0.72f), Metal = 0f, Rough = 0.03f, Surface = Surface.Glass, Cull = 2, CastShadows = false };
+        yield return new Spec { Name = "Car_Lens_Smoked", Base = S(0.05f, 0.05f, 0.055f, 0.22f), Metal = 0f, Rough = 0.02f, Surface = Surface.Glass, Cull = 0, CastShadows = false };
+        yield return new Spec { Name = "Car_Mirror_Glass", Base = S(0.92f, 0.93f, 0.94f), Metal = 1f, Rough = 0.02f };
+        yield return new Spec { Name = "Car_Chrome", Base = S(0.92f, 0.92f, 0.93f), Metal = 1f, Rough = 0.07f };
+        yield return new Spec { Name = "Car_Chrome_Satin", Base = S(0.80f, 0.80f, 0.82f), Metal = 1f, Rough = 0.24f };
+        yield return new Spec { Name = "Car_Trim_GlossBlack", Base = S(0.025f, 0.025f, 0.028f), Metal = 0f, Rough = 0.12f };
+        yield return new Spec { Name = "Car_Trim_SatinBlack", Base = S(0.04f, 0.04f, 0.042f), Metal = 0f, Rough = 0.55f };
+        yield return new Spec { Name = "Car_Taillight_Red", Base = S(0.45f, 0.02f, 0.02f), Metal = 0f, Rough = 0.08f, Emission = new Color(1f, 0.03f, 0.02f), EmissionIntensity = 0.6f };
+
+        // ---- hero CarConcept (textures, transforms and the second-UV AO come from the imported materials)
+        yield return new Spec { Name = "Car_Concept_Paint_Carmine", Coat = true, TemplateGlb = ConceptGlb, TemplateName = "Paint 1 Carmine", Base = S(0.55f, 0.02f, 0.03f), Metal = 0.55f, Rough = 0.38f, CoatRough = 0.03f, DropNormal = true, Occlusion = 0.6f };
+        yield return new Spec { Name = "Car_Concept_Paint_GlossBlack", Coat = true, TemplateGlb = ConceptGlb, TemplateName = "Paint 2 Carmine", Base = S(0.03f, 0.03f, 0.033f), Metal = 0.35f, Rough = 0.38f, CoatRough = 0.03f, DropNormal = true, Occlusion = 0.6f };
+        yield return new Spec { Name = "Car_Concept_Trim_SatinBlack", TemplateGlb = ConceptGlb, TemplateName = "", Base = S(0.035f, 0.035f, 0.037f), Metal = 0f, Rough = 0.6f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_Leather_Black", TemplateGlb = ConceptGlb, TemplateName = "Interior 1", Base = S(0.05f, 0.047f, 0.045f), Metal = 0f, Rough = 0.55f, Occlusion = 1f };
+        yield return new Spec { Name = "Car_Concept_Alcantara_Black", TemplateGlb = ConceptGlb, TemplateName = "Interior 2", Base = S(0.055f, 0.055f, 0.055f), Metal = 0f, Rough = 0.88f, Occlusion = 1f };
+        yield return new Spec { Name = "Car_Concept_Leather_Carmine", TemplateGlb = ConceptGlb, TemplateName = "Interior 3 Carmine", Base = S(0.45f, 0.055f, 0.045f), Metal = 0f, Rough = 0.5f, Occlusion = 1f };
+        yield return new Spec { Name = "Car_Concept_Plastic_Black", TemplateGlb = ConceptGlb, TemplateName = "Panel Sides", Base = S(0.05f, 0.05f, 0.052f), Metal = 0f, Rough = 0.55f, Occlusion = 1f };
+        yield return new Spec { Name = "Car_Concept_Carpet", TemplateGlb = ConceptGlb, TemplateName = "Floormat", Base = S(0.07f, 0.07f, 0.07f), Metal = 0f, Rough = 0.95f, Occlusion = 1f };
+        yield return new Spec { Name = "Car_Concept_Aluminium_Brushed", TemplateGlb = ConceptGlb, TemplateName = "Hardware", Base = S(0.78f, 0.78f, 0.79f), Metal = 1f, Rough = 0.3f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_Mechanical", TemplateGlb = ConceptGlb, TemplateName = "Mechanical", Base = S(0.30f, 0.30f, 0.31f), Metal = 1f, Rough = 1f, DropMetalRough = false, Occlusion = 1f };
+        yield return new Spec { Name = "Car_Concept_Dashboard", TemplateGlb = ConceptGlb, TemplateName = "Dashboard", Base = S(0.02f, 0.02f, 0.022f), Metal = 0f, Rough = 0.12f, KeepTemplateEmission = true, EmissionScale = 1f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_LicensePlate", TemplateGlb = ConceptGlb, TemplateName = "License", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.35f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_Headlight_LED", TemplateGlb = ConceptGlb, TemplateName = "Headlight", Base = S(0.03f, 0.03f, 0.035f), Metal = 0f, Rough = 0.1f, Emission = new Color(0.78f, 0.88f, 1f), EmissionIntensity = 3f };
+        yield return new Spec { Name = "Car_Concept_Taillight", TemplateGlb = ConceptGlb, TemplateName = "Brakelight", Base = S(0.38f, 0.015f, 0.015f), Metal = 0f, Rough = 0.08f, Emission = new Color(1f, 0.02f, 0.015f), EmissionIntensity = 0.9f };
+        yield return new Spec { Name = "Car_Concept_Indicator", TemplateGlb = ConceptGlb, TemplateName = "Signallight", Base = S(0.55f, 0.25f, 0.02f), Metal = 0f, Rough = 0.08f };
+        yield return new Spec { Name = "Car_Concept_Caliper_Red", TemplateGlb = ConceptGlb, TemplateName = "Brake", Base = S(0.62f, 0.03f, 0.03f), Metal = 0f, Rough = 0.28f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_BrakeDisc", TemplateGlb = ConceptGlb, TemplateName = "Disc", Base = S(0.62f, 0.62f, 0.63f), Metal = 1f, Rough = 0.42f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_Tyre_Sidewall", TemplateGlb = ConceptGlb, TemplateName = "Tireside", Base = S(0.13f, 0.13f, 0.13f), DropBaseTexture = true, Metal = 0f, Rough = 0.72f, Occlusion = 0.9f };
+        yield return new Spec { Name = "Car_Concept_Tyre_Tread", TemplateGlb = ConceptGlb, TemplateName = "Tiretread", Base = S(0.11f, 0.11f, 0.11f), Metal = 0f, Rough = 0.82f, Occlusion = 0.9f };
+        yield return new Spec { Name = "Car_Concept_Rim_Gunmetal", TemplateGlb = ConceptGlb, TemplateName = "Rim1", Base = S(0.16f, 0.16f, 0.17f), Metal = 0.9f, Rough = 0.32f, Occlusion = 0.85f };
+        yield return new Spec { Name = "Car_Concept_Rim_Machined", TemplateGlb = ConceptGlb, TemplateName = "Rim2", Base = S(0.86f, 0.86f, 0.87f), Metal = 1f, Rough = 0.16f, Occlusion = 0.85f };
+
+        // ---- BMW M3 E30 (solid Brilliantrot); rims, discs, calipers, lenses and trims keep their PBR imports
+        yield return new Spec { Name = "Car_E30_Paint_Red", Coat = true, TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_PAINT", Base = S(0.72f, 0.05f, 0.045f), Metal = 0f, Rough = 0.32f, CoatRough = 0.03f, Occlusion = 0.6f };
+        yield return new Spec { Name = "Car_E30_Tyre", TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_TIRE", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.8f, Occlusion = 1f };
+        // Already physically based in the GLB: exact copies, only with compressed 1K textures instead of the
+        // uncompressed 2048 RGBA32 imports.
+        yield return new Spec { Name = "Car_E30_Rim", TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_RIM", KeepTemplate = true };
+        yield return new Spec { Name = "Car_E30_BrakeDisc", TemplateGlb = E30Glb, TemplateName = "Brake_Disc", KeepTemplate = true, AndroidMax = 512 };
+        yield return new Spec { Name = "Car_E30_Caliper", TemplateGlb = E30Glb, TemplateName = "Brembo_Calipers", KeepTemplate = true, AndroidMax = 512 };
+        yield return new Spec { Name = "Car_E30_Lens", TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_LENS", KeepTemplate = true };
+        yield return new Spec { Name = "Car_E30_Emblems", TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_EMBLEMS", KeepTemplate = true, AndroidMax = 512 };
+        yield return new Spec { Name = "Car_E30_TaillightReflector", TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_TAILLIGHT_REFLECTOR", KeepTemplate = true, AndroidMax = 512 };
+
+        // ---- BMW M4 Competition (Alpine White, carbon roof)
+        yield return new Spec { Name = "Car_M4_Paint_White", Coat = true, Base = S(0.86f, 0.865f, 0.87f), Metal = 0f, Rough = 0.4f, CoatRough = 0.035f };
+        yield return new Spec { Name = "Car_M4_Paint_Livery", Coat = true, TemplateGlb = M4Glb, TemplateName = "Mesheslivery1Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.4f, CoatRough = 0.035f };
+        yield return new Spec { Name = "Car_M4_Carbon", Coat = true, TemplateGlb = M4Glb, TemplateName = "Meshesbody151Mtl", Base = S(1f, 1f, 1f), Metal = 0.2f, Rough = 0.35f, CoatRough = 0.04f };
+        yield return new Spec { Name = "Car_M4_Rim", TemplateGlb = M4Glb, TemplateName = "Meshesm8rim1Mtl", Base = S(1f, 1f, 1f), Metal = 0.8f, Rough = 0.3f };
+        yield return new Spec { Name = "Car_M4_Tyre", TemplateGlb = M4Glb, TemplateName = "Meshesm8rim0011Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.8f };
+        yield return new Spec { Name = "Car_M4_Caliper_Gold", Coat = true, Base = S(0.78f, 0.58f, 0.2f), Metal = 0.3f, Rough = 0.35f, CoatRough = 0.08f };
+        yield return new Spec { Name = "Car_M4_Grille", TemplateGlb = M4Glb, TemplateName = "Meshespiggrill1Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.2f };
+        yield return new Spec { Name = "Car_M4_LampInternals", TemplateGlb = M4Glb, TemplateName = "Mesheslight51Mtl", Base = S(1f, 1f, 1f), Metal = 0.6f, Rough = 0.15f };
+        yield return new Spec { Name = "Car_M4_LampInternals_Led", TemplateGlb = M4Glb, TemplateName = "Meshesled11Mtl", Base = S(1f, 1f, 1f), Metal = 0.3f, Rough = 0.2f };
+        yield return new Spec { Name = "Car_M4_LampInternals_Led2", TemplateGlb = M4Glb, TemplateName = "Meshesled111Mtl", Base = S(1f, 1f, 1f), Metal = 0.3f, Rough = 0.2f };
+        yield return new Spec { Name = "Car_M4_Badge_Front", TemplateGlb = M4Glb, TemplateName = "Mesheslogo11Mtl", Base = S(1f, 1f, 1f), Metal = 0.5f, Rough = 0.2f };
+        yield return new Spec { Name = "Car_M4_Badge_Rear", TemplateGlb = M4Glb, TemplateName = "Mesheslogo31Mtl", Base = S(1f, 1f, 1f), Metal = 0.5f, Rough = 0.2f };
+        yield return new Spec { Name = "Car_M4_Trim_Atlas", TemplateGlb = M4Glb, TemplateName = "Meshesff41Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.45f };
+        yield return new Spec { Name = "Car_M4_Trim_Atlas_Engine", TemplateGlb = M4Glb, TemplateName = "Meshesengine51Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.45f };
+        yield return new Spec { Name = "Car_M4_Trim_Atlas_Black", TemplateGlb = M4Glb, TemplateName = "Meshesblack151Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.45f };
+        yield return new Spec { Name = "Car_M4_Interior_Leather", TemplateGlb = M4Glb, TemplateName = "Meshesinterior71Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.55f };
+        yield return new Spec { Name = "Car_M4_Interior_Dash", TemplateGlb = M4Glb, TemplateName = "Meshesdash11Mtl", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.35f };
+
+        // ---- Tesla Model 3 (Pearl White Multi-Coat)
+        yield return new Spec { Name = "Car_Tesla_Paint_PearlWhite", Coat = true, Base = S(0.87f, 0.875f, 0.87f), Metal = 0.05f, Rough = 0.38f, CoatRough = 0.035f };
+        yield return new Spec { Name = "Car_Tesla_Paint_Sills", Coat = true, TemplateGlb = TeslaGlb, TemplateName = "primary.001", Base = S(0.95f, 0.95f, 0.95f), Metal = 0.05f, Rough = 0.38f, CoatRough = 0.035f };
+        yield return new Spec { Name = "Car_Tesla_Paint_DoorFrames", Coat = true, TemplateGlb = TeslaGlb, TemplateName = "primary.002", Base = S(0.95f, 0.95f, 0.95f), Metal = 0.05f, Rough = 0.38f, CoatRough = 0.035f };
+        yield return new Spec { Name = "Car_Tesla_Rim", TemplateGlb = TeslaGlb, TemplateName = "wheels.6", Base = S(0.9f, 0.9f, 0.92f), Metal = 0.85f, Rough = 0.28f };
+        yield return new Spec { Name = "Car_Tesla_Tyre", TemplateGlb = TeslaGlb, TemplateName = "wheels.2", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.8f };
+        yield return new Spec { Name = "Car_Tesla_BrakeDisc", TemplateGlb = TeslaGlb, TemplateName = "wheels.4", Base = S(1f, 1f, 1f), Metal = 0.7f, Rough = 0.45f };
+        yield return new Spec { Name = "Car_Tesla_Lens", TemplateGlb = TeslaGlb, TemplateName = "tembus_red.0", Metal = 0f, Rough = 0.04f, Surface = Surface.Glass, CastShadows = false };
+        yield return new Spec { Name = "Car_Tesla_Leather_White", TemplateGlb = TeslaGlb, TemplateName = "Putih.0", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.5f };
+        yield return new Spec { Name = "Car_Tesla_Interior_Dark", TemplateGlb = TeslaGlb, TemplateName = "movsteer_1.0.0", Base = S(1f, 1f, 1f), Metal = 0f, Rough = 0.65f };
+
+        // ---- traffic colour variants (exterior street only)
+        yield return new Spec { Name = "Car_Traffic_E30_Paint_DeepBlue", Coat = true, TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_PAINT", Base = S(0.05f, 0.11f, 0.3f), Metal = 0.55f, Rough = 0.4f, CoatRough = 0.03f, Occlusion = 0.6f };
+        yield return new Spec { Name = "Car_Traffic_E30_Paint_Black", Coat = true, TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_PAINT", Base = S(0.03f, 0.03f, 0.035f), Metal = 0.5f, Rough = 0.35f, CoatRough = 0.03f, Occlusion = 0.6f };
+        yield return new Spec { Name = "Car_Traffic_E30_Paint_Silver", Coat = true, TemplateGlb = E30Glb, TemplateName = "BMW_E30_M3_PAINT", Base = S(0.6f, 0.61f, 0.62f), Metal = 0.8f, Rough = 0.35f, CoatRough = 0.03f, Occlusion = 0.6f };
+        yield return new Spec { Name = "Car_Traffic_Tesla_Paint_MidnightSilver", Coat = true, Base = S(0.2f, 0.21f, 0.23f), Metal = 0.6f, Rough = 0.38f, CoatRough = 0.035f };
+        yield return new Spec { Name = "Car_Traffic_Tesla_Paint_DeepBlue", Coat = true, Base = S(0.05f, 0.1f, 0.28f), Metal = 0.55f, Rough = 0.38f, CoatRough = 0.035f };
+
+        // ---- V6 (CAD export without UVs: untextured zones by part name)
+        yield return new Spec { Name = "Car_V6_CastAluminium", Base = S(0.74f, 0.74f, 0.73f), Metal = 1f, Rough = 0.6f };
+        yield return new Spec { Name = "Car_V6_PolishedAluminium", Base = S(0.9f, 0.9f, 0.91f), Metal = 1f, Rough = 0.18f };
+        yield return new Spec { Name = "Car_V6_MachinedSteel", Base = S(0.72f, 0.72f, 0.74f), Metal = 1f, Rough = 0.26f };
+        yield return new Spec { Name = "Car_V6_DarkSteel", Base = S(0.34f, 0.34f, 0.35f), Metal = 1f, Rough = 0.42f };
+        yield return new Spec { Name = "Car_V6_ExhaustIron", Base = S(0.37f, 0.35f, 0.34f), Metal = 1f, Rough = 0.7f };
+        yield return new Spec { Name = "Car_V6_ValveCover_Black", Base = S(0.05f, 0.05f, 0.055f), Metal = 0f, Rough = 0.55f };
+        yield return new Spec { Name = "Car_V6_Rubber_Hose", Base = S(0.05f, 0.05f, 0.05f), Metal = 0f, Rough = 0.72f };
+        yield return new Spec { Name = "Car_V6_AirFilter_Housing", Base = S(0.045f, 0.045f, 0.05f), Metal = 0f, Rough = 0.4f };
+        yield return new Spec { Name = "Car_V6_AirFilter_Element", Base = S(0.55f, 0.06f, 0.05f), Metal = 0f, Rough = 0.9f };
+    }
+}
+#endif

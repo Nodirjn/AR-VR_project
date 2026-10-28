@@ -1,12 +1,20 @@
-# Unity
-[Ll]ibrary/
-[Tt]emp/
-[Oo]bj/
-[Bb]uild/
-[Bb]uilds/
-[Ll]ogs/
-[Uu]ser[Ss]ettings/
-[Mm]emoryCaptures/
+# Unity generated folders. The leading "/" anchors each pattern to the repository root, so folders
+# with the same names inside Assets (for example Assets/CompositionLayers/UserSettings) stay tracked.
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+/.utmp/
+
+# Unity crash reports and Test Runner scenes
+sysinfo.txt
+mono_crash.*
+/[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
 
 # IDE
 .vs/
@@ -20,10 +28,12 @@
 *.pidb
 *.booproj
 
-# Build fayllar
+# Build output
 *.apk
 *.aab
+*.app
 *.unitypackage
+.gradle/
 
 # OS
 .DS_Store

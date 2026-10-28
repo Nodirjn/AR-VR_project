@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 #if UNITY_EDITOR
 using System.IO;
+using System.Reflection;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine.SceneManagement;
@@ -16,12 +17,28 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     private const string ModelFolder = "Assets/Models/Exterior";
     private const string MaterialFolder = "Assets/Materials/Exterior";
     private readonly Dictionary<string, Material> materials = new Dictionary<string, Material>();
-    private Material asphalt, asphaltVertical, concrete, concreteVertical, paving, facadeCream, facadeWarm, facadeGraphite, facadeBlue;
+    private Material asphalt, asphaltVertical, concrete, paving, facadeCream, facadeWarm, facadeGraphite, facadeBlue;
     private Material glass, metal, gold, foliage, foliageLight, trunk, roadLine, bikeLane, signFace;
     private Material redOn, redOff, amberOn, amberOff, greenOn, greenOff, walkOn, walkOff;
     private Material tire, wheelMetal, headlight, tailLight, carBlue, carSilver, carRed, carWhite;
     private GameObject[] trafficVehiclePrefabs;
     private Mesh groundMesh, hillMesh, sedanBodyMesh, sedanCabinMesh, bicycleWheelMesh;
+    private readonly List<Vector3> plantedTrees = new List<Vector3>();
+    // World footprints of the buildings' facade masses; curbs, sidewalks, trees and lamps keep clear of them.
+    private readonly List<Rect> buildingFootprints = new List<Rect>();
+    private static readonly float[] EastWestStreets = { -47f, 60f, 118f };
+    private static readonly float[] NorthSouthStreets = { -96f, 96f };
+    // North-south streets end 6.5 m past the outer junctions, clear of the buildings facing their ends.
+    private const float NorthSouthStart = -60f, NorthSouthEnd = 131f;
+    // Paved areas besides the streets: arrival apron, customer parking and its driveway, cycle tracks.
+    private static readonly Rect[] PavedAreas =
+    {
+        Rect.MinMaxRect(-23f, 18f, 25f, 53.6f), Rect.MinMaxRect(-64.5f, -7.5f, -37.5f, 37.5f), Rect.MinMaxRect(-54f, 47.3f, -46f, 60.3f),
+        Rect.MinMaxRect(-140f, 74.1f, 140f, 75.9f), Rect.MinMaxRect(-128.9f, 54.4f, -127.1f, 75f), Rect.MinMaxRect(127.1f, 54.4f, 128.9f, 75f)
+    };
+    // The existing Showroom Floor (50 x 50 m plane at y = -0.05). The city ground drops below it so the two never z-fight.
+    private static readonly Rect ShowroomFloor = Rect.MinMaxRect(-25f, -25f, 25f, 25f);
+    private const float ShowroomGroundY = -.2f;
 
     [ContextMenu("Build Aurelle Exterior District")]
     public void BuildEnvironment()
@@ -31,6 +48,33 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
             Debug.LogWarning("Stop Play Mode before building the exterior district.", this);
             return;
         }
+        Scene scene = gameObject.scene;
+        if (!scene.IsValid() || !scene.isLoaded || EditorSceneManager.IsPreviewScene(scene))
+        {
+            Debug.LogWarning("Build the exterior district from an open scene.", this);
+            return;
+        }
+        // Daylight settings apply to the active scene, so the builder's own scene is active while it builds.
+        Scene previousActive = SceneManager.GetActiveScene();
+        if (scene != previousActive) SceneManager.SetActiveScene(scene);
+        try
+        {
+            BuildDistrict();
+        }
+        finally
+        {
+            if (scene != previousActive && previousActive.isLoaded) SceneManager.SetActiveScene(previousActive);
+        }
+
+        EditorSceneManager.MarkSceneDirty(scene);
+        EditorUtility.SetDirty(this);
+        AssetDatabase.SaveAssets();
+        EditorSceneManager.SaveScene(scene);
+        Debug.Log("Aurelle exterior district built: connected roads, arrival plaza, neighborhood blocks, traffic, pedestrians, cyclists and spawn point.", this);
+    }
+
+    private void BuildDistrict()
+    {
         EnsureFolder("Assets/Materials");
         EnsureFolder(MaterialFolder);
         EnsureFolder(MaterialFolder + "/Textures");
@@ -53,21 +97,16 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         Transform spawnGroup = Group("Exterior Spawn", transform);
 
         BuildGroundAndHills(ground);
+        // Buildings come first so the streets, trees and lamps can keep clear of their footprints.
+        BuildBuildings(buildings);
         BuildRoads(roads);
         BuildArrivalPlaza(ground);
         BuildDealershipSign(ground);
-        BuildBuildings(buildings);
         BuildLandscaping(landscape);
         BuildStreetDetails(details);
         BuildTraffic(traffic);
         BuildSpawn(spawnGroup);
         ConfigureDaylight();
-
-        EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
-        EditorUtility.SetDirty(this);
-        AssetDatabase.SaveAssets();
-        EditorSceneManager.SaveScene(SceneManager.GetActiveScene());
-        Debug.Log("Aurelle exterior district built: connected roads, arrival plaza, neighborhood blocks, traffic, pedestrians, cyclists and spawn point.", this);
     }
 
     [MenuItem("Aurelle/Build Exterior District")]
@@ -78,7 +117,14 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
             Debug.LogWarning("Stop Play Mode before building the exterior district.");
             return;
         }
-        GameObject root = GameObject.Find("Exterior Environment");
+        // Inactive objects count too, so a disabled district is rebuilt in place instead of duplicated.
+        GameObject[] roots = SceneManager.GetActiveScene().GetRootGameObjects();
+        GameObject root = Array.Find(roots, candidate => candidate.name == "Exterior Environment");
+        for (int i = 0; root == null && i < roots.Length; i++)
+        {
+            ExteriorEnvironmentBuilder existing = roots[i].GetComponentInChildren<ExteriorEnvironmentBuilder>(true);
+            if (existing != null) root = existing.gameObject;
+        }
         if (root == null)
         {
             root = new GameObject("Exterior Environment");
@@ -93,13 +139,11 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     {
         materials.Clear();
         asphalt = Mat("Asphalt", new Color(.58f,.60f,.62f), .02f,.28f, "AsphaltGrain", new Vector2(72,4));
-        asphaltVertical = Mat("Asphalt Vertical", new Color(.58f,.60f,.62f), .02f,.28f, "AsphaltGrain", new Vector2(4,72));
+        asphaltVertical = Mat("Asphalt Vertical", new Color(.58f,.60f,.62f), .02f,.28f, "AsphaltGrain", new Vector2(4,62.5f));
         concrete = Mat("Sidewalk Concrete", new Color(.72f,.72f,.69f), .02f,.36f, "ConcreteFine", new Vector2(140,2));
-        concreteVertical = Mat("Sidewalk Concrete Vertical", new Color(.72f,.72f,.69f), .02f,.36f, "ConcreteFine", new Vector2(2,110));
         ApplyPbrMaps(asphalt, "asphalt_02_diff_2k.jpg", "asphalt_02_nor_dx_2k.png", "asphalt_02_metallic_smoothness.png", .45f, .62f);
         ApplyPbrMaps(asphaltVertical, "asphalt_02_diff_2k.jpg", "asphalt_02_nor_dx_2k.png", "asphalt_02_metallic_smoothness.png", .45f, .62f);
         ApplyPbrMaps(concrete, "granular_concrete_diff_2k.jpg", "granular_concrete_nor_dx_2k.jpg", "granular_concrete_metallic_smoothness.png", .32f, .52f);
-        ApplyPbrMaps(concreteVertical, "granular_concrete_diff_2k.jpg", "granular_concrete_nor_dx_2k.jpg", "granular_concrete_metallic_smoothness.png", .32f, .52f);
         paving = Mat("Arrival Limestone", new Color(.68f,.65f,.57f), .08f,.38f, "PaverJoint", new Vector2(12,12));
         facadeCream = Mat("Facade Light Limestone", new Color(.72f,.70f,.64f), .08f,.36f, "FacadeStone", new Vector2(4,4));
         facadeWarm = Mat("Facade Warm Brick", new Color(.47f,.34f,.27f), .03f,.28f, "FacadeStone", new Vector2(5,4));
@@ -135,11 +179,12 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         sedanBodyMesh = BuildSedanMeshAsset("TrafficSedanBody", false);
         sedanCabinMesh = BuildSedanMeshAsset("TrafficSedanCabin", true);
         bicycleWheelMesh = BuildBicycleWheelAsset();
+        // Traffic agents drive along +Z; the Tesla model's nose points along -Z.
         trafficVehiclePrefabs = new[]
         {
-            BuildTrafficVehiclePrefab("Assets/Models/ShowroomCollection/BMW_M3_E30.glb", "TrafficVehicle_E30.prefab"),
-            BuildTrafficVehiclePrefab("Assets/Models/ShowroomCollection/BMW_M4_Competition.glb", "TrafficVehicle_M4.prefab"),
-            BuildTrafficVehiclePrefab("Assets/Models/ShowroomCollection/Tesla_Model_3_2018.glb", "TrafficVehicle_Tesla.prefab")
+            BuildTrafficVehiclePrefab("Assets/Models/ShowroomCollection/BMW_M3_E30.glb", "TrafficVehicle_E30.prefab", 0f),
+            BuildTrafficVehiclePrefab("Assets/Models/ShowroomCollection/BMW_M4_Competition.glb", "TrafficVehicle_M4.prefab", 0f),
+            BuildTrafficVehiclePrefab("Assets/Models/ShowroomCollection/Tesla_Model_3_2018.glb", "TrafficVehicle_Tesla.prefab", 180f)
         };
     }
 
@@ -163,10 +208,8 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void BuildRoads(Transform parent)
     {
-        float[] eastWest = { -47f, 60f, 118f };
-        float[] northSouth = { -96f, 96f };
-        foreach(float z in eastWest) BuildEastWestStreet(parent,z);
-        foreach(float x in northSouth) BuildNorthSouthStreet(parent,x);
+        foreach(float z in EastWestStreets) BuildEastWestStreet(parent,z);
+        foreach(float x in NorthSouthStreets) BuildNorthSouthStreet(parent,x);
         // Raised driveways keep the showroom approach and west parking connected to the arterial.
         Box(parent,"Dealership Connector Road",new Vector3(1f,-.018f,53.8f),new Vector3(10.5f,.075f,13.0f),asphalt,true);
         Box(parent,"Parking Connector Road",new Vector3(-50f,-.018f,53.8f),new Vector3(8f,.075f,13.0f),asphalt,true);
@@ -183,26 +226,39 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         Box(parent,"East West Asphalt",new Vector3(0f,-.018f,z),new Vector3(280f,.09f,13f),asphalt,true);
         for(int side=-1;side<=1;side+=2)
         {
-            float curbZ=z+side*6.65f;
-            if(Mathf.Approximately(z,60f) && side<0)
+            // Curbs and sidewalks stop at the cross streets, so junctions and their crossings stay level.
+            var curbGaps=new List<Vector2>();
+            var walkGaps=new List<Vector2>();
+            foreach(float x in NorthSouthStreets){curbGaps.Add(new Vector2(x-6.8f,x+6.8f));walkGaps.Add(new Vector2(x-13.8f,x+13.8f));}
+            if(Mathf.Approximately(z,60f))
             {
-                Box(parent,"Raised Granite Curb West",new Vector3(-72f,.035f,curbZ),new Vector3(136f,.22f,.30f),facadeCream,false);
-                Box(parent,"Raised Granite Curb East",new Vector3(72f,.035f,curbZ),new Vector3(136f,.22f,.30f),facadeCream,false);
+                // Dropped curbs for the dealership and parking driveways, the cycle track connectors and the crossing's north end.
+                if(side<0){curbGaps.Add(new Vector2(-4.25f,6.25f));curbGaps.Add(new Vector2(-54f,-46f));}
+                else{curbGaps.Add(new Vector2(-128.9f,-127.1f));curbGaps.Add(new Vector2(127.1f,128.9f));curbGaps.Add(new Vector2(-5.5f,7.5f));}
             }
-            else Box(parent,"Raised Granite Curb",new Vector3(0f,.035f,curbZ),new Vector3(280f,.22f,.30f),facadeCream,false);
-            float sidewalkOffset=11.8f;
-            Box(parent,"Concrete Sidewalk",new Vector3(0f,.015f,z+side*sidewalkOffset),new Vector3(280f,.08f,4.0f),concrete,true);
+            float curbZ=z+side*6.65f,sidewalkZ=z+side*11.8f;
+            FootprintGaps(curbGaps,curbZ-.15f,curbZ+.15f,true);
+            FootprintGaps(walkGaps,sidewalkZ-2f,sidewalkZ+2f,true);
+            foreach(Vector2 run in Runs(-140f,140f,curbGaps))
+                Box(parent,"Raised Granite Curb",new Vector3((run.x+run.y)*.5f,.035f,curbZ),new Vector3(run.y-run.x,.22f,.30f),facadeCream,false);
+            List<Vector2> walks=Runs(-140f,140f,walkGaps);
+            foreach(Vector2 run in walks)
+                Box(parent,"Concrete Sidewalk",new Vector3((run.x+run.y)*.5f,.015f,sidewalkZ),new Vector3(run.y-run.x,.08f,4.0f),SidewalkMaterial(run.y-run.x,true),true);
             for(float x=-132;x<=132;x+=12f)
-                Box(parent,"Sidewalk Control Joint",new Vector3(x,.057f,z+side*sidewalkOffset),new Vector3(.035f,.006f,3.8f),paving,false);
+                if(InRuns(x,walks)) Box(parent,"Sidewalk Control Joint",new Vector3(x,.057f,sidewalkZ),new Vector3(.035f,.006f,3.8f),paving,false);
         }
+        // The dealership crossing at x=1 and its stop lines at x=1±9 stay clear of lane markings.
+        bool dealershipCrossing=Mathf.Approximately(z,60f);
         for(float x=-136;x<=136;x+=7.5f)
         {
+            if(NearAny(x,NorthSouthStreets,8.6f) || (dealershipCrossing && Mathf.Abs(x-1f)<11.3f))continue;
             Box(parent,"Broken Center Line",new Vector3(x,.032f,z),new Vector3(4.2f,.018f,.13f),roadLine,false);
             Box(parent,"Lane Dash",new Vector3(x,.032f,z-3.7f),new Vector3(2.7f,.016f,.10f),roadLine,false);
             Box(parent,"Lane Dash",new Vector3(x,.032f,z+3.7f),new Vector3(2.7f,.016f,.10f),roadLine,false);
         }
         for(int x=-120;x<=120;x+=30)
         {
+            if(NearAny(x,NorthSouthStreets,7.5f) || (dealershipCrossing && Mathf.Abs(x-1f)<11.3f))continue;
             CreateArrow(parent,new Vector3(x,.033f,z-2f),Quaternion.Euler(0f,90f,0f));
             CreateArrow(parent,new Vector3(x,.033f,z+2f),Quaternion.Euler(0f,270f,0f));
         }
@@ -210,26 +266,83 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void BuildNorthSouthStreet(Transform parent,float x)
     {
-        Box(parent,"North South Asphalt",new Vector3(x,-.018f,34f),new Vector3(13f,.09f,220f),asphaltVertical,true);
+        Box(parent,"North South Asphalt",new Vector3(x,-.018f,(NorthSouthStart+NorthSouthEnd)*.5f),new Vector3(13f,.09f,NorthSouthEnd-NorthSouthStart),asphaltVertical,true);
         for(int side=-1;side<=1;side+=2)
         {
-            float curbX=x+side*6.65f;
-            Box(parent,"Raised Granite Curb",new Vector3(curbX,.035f,34f),new Vector3(.30f,.22f,220f),facadeCream,false);
-            Box(parent,"Concrete Sidewalk",new Vector3(x+side*11.8f,.015f,34f),new Vector3(4f,.08f,220f),concreteVertical,true);
+            float curbX=x+side*6.65f,sidewalkX=x+side*11.8f;
+            // The north cycle track crosses at z=75.
+            var curbGaps=new List<Vector2>{new Vector2(74.1f,75.9f)};
+            var walkGaps=new List<Vector2>();
+            foreach(float z in EastWestStreets){curbGaps.Add(new Vector2(z-6.5f,z+6.5f));walkGaps.Add(new Vector2(z-6.8f,z+6.8f));}
+            FootprintGaps(curbGaps,curbX-.15f,curbX+.15f,false);
+            FootprintGaps(walkGaps,sidewalkX-2f,sidewalkX+2f,false);
+            List<Vector2> walks=Runs(NorthSouthStart,NorthSouthEnd,walkGaps);
+            foreach(Vector2 run in Runs(NorthSouthStart,NorthSouthEnd,curbGaps))
+                Box(parent,"Raised Granite Curb",new Vector3(curbX,.035f,(run.x+run.y)*.5f),new Vector3(.30f,.22f,run.y-run.x),facadeCream,false);
+            foreach(Vector2 run in walks)
+                Box(parent,"Concrete Sidewalk",new Vector3(sidewalkX,.015f,(run.x+run.y)*.5f),new Vector3(4f,.08f,run.y-run.x),SidewalkMaterial(run.y-run.x,false),true);
             for(float z=-65;z<=140;z+=12f)
-                Box(parent,"Sidewalk Control Joint",new Vector3(x+side*11.8f,.057f,z),new Vector3(3.8f,.006f,.035f),paving,false);
+                if(InRuns(z,walks)) Box(parent,"Sidewalk Control Joint",new Vector3(sidewalkX,.057f,z),new Vector3(3.8f,.006f,.035f),paving,false);
         }
         for(float z=-70;z<=140;z+=7.5f)
         {
+            if(NearAny(z,EastWestStreets,8.6f) || z-2.1f<NorthSouthStart || z+2.1f>NorthSouthEnd)continue;
             Box(parent,"Broken Center Line",new Vector3(x,.032f,z),new Vector3(.13f,.018f,4.2f),roadLine,false);
             Box(parent,"Lane Dash",new Vector3(x-3.7f,.032f,z),new Vector3(.10f,.016f,2.7f),roadLine,false);
             Box(parent,"Lane Dash",new Vector3(x+3.7f,.032f,z),new Vector3(.10f,.016f,2.7f),roadLine,false);
         }
         for(int z=-60;z<=130;z+=30)
         {
-            CreateArrow(parent,new Vector3(x-2f,.033f,z),Quaternion.identity);
-            CreateArrow(parent,new Vector3(x+2f,.033f,z),Quaternion.Euler(0f,180f,0f));
+            if(NearAny(z,EastWestStreets,7.5f) || z-1f<NorthSouthStart || z+1f>NorthSouthEnd)continue;
+            // Right-hand traffic: southbound on the west half, northbound on the east half.
+            CreateArrow(parent,new Vector3(x-2f,.033f,z),Quaternion.Euler(0f,180f,0f));
+            CreateArrow(parent,new Vector3(x+2f,.033f,z),Quaternion.identity);
         }
+    }
+
+    // The pieces of [from,to] left between the gaps; x and y are the start and end of each gap and run.
+    private static List<Vector2> Runs(float from,float to,List<Vector2> gaps)
+    {
+        gaps.Sort((a,b)=>a.x.CompareTo(b.x));
+        var runs=new List<Vector2>();
+        float start=from;
+        foreach(Vector2 gap in gaps)
+        {
+            if(gap.x-start>.01f)runs.Add(new Vector2(start,Mathf.Min(gap.x,to)));
+            start=Mathf.Max(start,gap.y);
+            if(start>=to)break;
+        }
+        if(to-start>.01f)runs.Add(new Vector2(start,to));
+        return runs;
+    }
+
+    // Adds a gap for every building whose footprint crosses the band [bandMin,bandMax] of a run along x (or along z).
+    private void FootprintGaps(List<Vector2> gaps,float bandMin,float bandMax,bool alongX)
+    {
+        foreach(Rect footprint in buildingFootprints)
+        {
+            if(alongX && footprint.yMin<bandMax && footprint.yMax>bandMin) gaps.Add(new Vector2(footprint.xMin,footprint.xMax));
+            else if(!alongX && footprint.xMin<bandMax && footprint.xMax>bandMin) gaps.Add(new Vector2(footprint.yMin,footprint.yMax));
+        }
+    }
+
+    private bool NearBuilding(Vector3 p,float clearance)
+    {
+        foreach(Rect footprint in buildingFootprints)
+            if(p.x>=footprint.xMin-clearance && p.x<=footprint.xMax+clearance && p.z>=footprint.yMin-clearance && p.z<=footprint.yMax+clearance)return true;
+        return false;
+    }
+
+    private static bool InRuns(float value,List<Vector2> runs)
+    {
+        foreach(Vector2 run in runs) if(value>run.x+.1f && value<run.y-.1f) return true;
+        return false;
+    }
+
+    private static bool NearAny(float value,float[] centres,float distance)
+    {
+        foreach(float centre in centres) if(Mathf.Abs(value-centre)<distance) return true;
+        return false;
     }
 
     private void PaintCrossing(Transform parent,float x,float z,bool acrossEastWest)
@@ -244,8 +357,10 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         }
         if(acrossEastWest)
         {
-            Box(parent,"Approach Stop Line",new Vector3(x-9f,.039f,z-6.0f),new Vector3(.34f,.018f,12f),roadLine,false);
-            Box(parent,"Approach Stop Line",new Vector3(x+9f,.039f,z+6.0f),new Vector3(.34f,.018f,12f),roadLine,false);
+            // Each stop line spans its approach lane only: eastbound from the avenue cycle lane (to z-4.7) up to the centre line,
+            // westbound from the centre line to the north curb.
+            Box(parent,"Approach Stop Line",new Vector3(x-9f,.039f,z-2.35f),new Vector3(.34f,.018f,4.7f),roadLine,false);
+            Box(parent,"Approach Stop Line",new Vector3(x+9f,.039f,z+3.25f),new Vector3(.34f,.018f,6.5f),roadLine,false);
         }
     }
 
@@ -282,6 +397,8 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         // Tactile paving and a gentle ramp at the public sidewalk edge.
         Box(parent,"Tactile Paving Warning Band",new Vector3(1f,.042f,50.4f),new Vector3(9.2f,.025f,.75f),gold,false);
         Box(parent,"Accessible Ramp",new Vector3(1f,.005f,52.0f),new Vector3(9.5f,.04f,3.0f),concrete,true);
+        // The crossing's north end: a paved landing from the dropped curb across the verge to the north sidewalk.
+        Box(parent,"Accessible Ramp",new Vector3(1f,.005f,68.15f),new Vector3(13f,.04f,3.3f),SidewalkMaterial(13f,true),true);
         Box(parent,"Cycle Track Along Avenue",new Vector3(1f,.025f,54.4f),new Vector3(280f,.045f,1.8f),bikeLane,true);
         for(int x=-130;x<=130;x+=18)
             CreateArrow(parent,new Vector3(x,.052f,54.4f),Quaternion.Euler(0f,90f,0f),.64f);
@@ -302,13 +419,15 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         for(int side=-1;side<=1;side+=2)
         {
             Box(parent,"Arrival Wayfinding Pylon",new Vector3(1f+side*24f,1.25f,35f),new Vector3(.28f,2.5f,.28f),metal,true);
-            Box(parent,"Pylon Display",new Vector3(1f+side*24f,2.22f,35f),new Vector3(.20f,.50f,.05f),signFace,false);
-            CreateText(parent,side<0?"SALES":"SERVICE",new Vector3(1f+side*24f,2.22f,35.07f),Quaternion.identity,.10f,new Color(.94f,.81f,.57f),TextAlignment.Center,new Vector2(.17f,.16f));
+            // The display rests on the pylon's street face (z=35.14) and the depth-tested label sits 1 cm in front of it.
+            Box(parent,"Pylon Display",new Vector3(1f+side*24f,2.22f,35.165f),new Vector3(.20f,.50f,.05f),signFace,false);
+            CreateText(parent,side<0?"SALES":"SERVICE",new Vector3(1f+side*24f,2.22f,35.20f),Quaternion.identity,.10f,new Color(.94f,.81f,.57f),TextAlignment.Center,new Vector2(.17f,.16f));
         }
     }
 
     private void BuildBuildings(Transform parent)
     {
+        buildingFootprints.Clear();
         Building(parent,"Aurelle Quarter Market",new Vector3(-46f,0f,92f),180f,29f,18f,20f,5,facadeCream,"GROCERY  |  MARKET 24");
         Building(parent,"NOVA Pharmacy",new Vector3(46f,0f,92f),180f,24f,18f,12f,3,facadeBlue,"NOVA PHARMACY");
         Building(parent,"North Offices",new Vector3(10f,0f,143f),180f,34f,18f,28f,7,facadeGraphite,"AURELLE BUSINESS CENTRE");
@@ -331,13 +450,17 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void Building(Transform parent,string name,Vector3 position,float yaw,float width,float depth,float height,int floors,Material wall,string sign)
     {
-        Transform root=Group(name,parent);
+        Transform root=NewEmpty(name,parent);
         root.localPosition=position;
         root.localRotation=Quaternion.Euler(0f,yaw,0f);
+        float c=Mathf.Abs(Mathf.Cos(yaw*Mathf.Deg2Rad)),s=Mathf.Abs(Mathf.Sin(yaw*Mathf.Deg2Rad));
+        Vector2 half=new Vector2(c*width+s*depth,s*width+c*depth)*.5f;
+        buildingFootprints.Add(Rect.MinMaxRect(root.position.x-half.x,root.position.z-half.y,root.position.x+half.x,root.position.z+half.y));
         Box(root,"Facade Mass",new Vector3(0f,height*.5f,0f),new Vector3(width,height,depth),wall,true);
         Box(root,"Ground Floor Plinth",new Vector3(0f,.24f,0f),new Vector3(width+.25f,.48f,depth+.2f),facadeGraphite,false);
         Box(root,"Roof Parapet",new Vector3(0f,height+.40f,0f),new Vector3(width+.5f,.8f,depth+.45f),facadeGraphite,false);
-        Box(root,"Street Side Canopy",new Vector3(0f,3.32f,depth*.5f+.48f),new Vector3(width-.4f,.18f,1.05f),metal,false);
+        // Above the header band (top 3.62), so the depth-tested sign below it stays whole from the street.
+        Box(root,"Street Side Canopy",new Vector3(0f,3.72f,depth*.5f+.48f),new Vector3(width-.4f,.18f,1.05f),metal,false);
         int bays=Mathf.Max(3,Mathf.FloorToInt(width/3.4f));
         float bay=width/bays;
         // Street-level glazing and mullions.
@@ -378,26 +501,8 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void BuildLandscaping(Transform parent)
     {
-        BoxCollider[] buildingColliders=transform.Find("Commercial Blocks").GetComponentsInChildren<BoxCollider>(true);
-        float[] streetRows={-47f,60f,118f};
-        foreach(float z in streetRows)
-        {
-            for(int x=-126;x<=126;x+=26)
-            {
-                if(Mathf.Abs(x-1f)<13f && z==60f) continue;
-                TreeIfClear(parent,new Vector3(x,.01f,z-17f),.86f+(Mathf.Abs(x)%3)*.08f,buildingColliders);
-                TreeIfClear(parent,new Vector3(x+9f,.01f,z+17f),.78f+(Mathf.Abs(x)%4)*.06f,buildingColliders);
-            }
-        }
-        foreach(float x in new[]{-96f,96f})
-        {
-            for(int z=-35;z<=130;z+=28)
-            {
-                TreeIfClear(parent,new Vector3(x-13f,.01f,z),.83f,buildingColliders);
-                TreeIfClear(parent,new Vector3(x+13f,.01f,z+8f),.94f,buildingColliders);
-            }
-        }
-        // Planted forecourt beds, kept outside the 9 m clear pedestrian corridor.
+        plantedTrees.Clear();
+        // Planted forecourt beds, kept outside the 9 m clear pedestrian corridor. Planted first so street trees keep clear of them.
         for(int side=-1;side<=1;side+=2)
         {
             for(int i=0;i<5;i++)
@@ -405,6 +510,24 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
                 Vector3 p=new Vector3(1f+side*28f,.02f,22f+i*5.0f);
                 Tree(parent,p,.72f+(i%3)*.09f);
                 for(int j=0;j<3;j++) AddShrub(parent,p+new Vector3(side*2f,.20f,(j-1)*1.1f),.8f,foliage);
+            }
+        }
+        foreach(float z in EastWestStreets)
+        {
+            for(int x=-126;x<=126;x+=26)
+            {
+                if(Mathf.Abs(x-1f)<13f && z==60f) continue;
+                TreeIfClear(parent,new Vector3(x,.01f,z-17f),.86f+(Mathf.Abs(x)%3)*.08f);
+                TreeIfClear(parent,new Vector3(x+9f,.01f,z+17f),.78f+(Mathf.Abs(x)%4)*.06f);
+            }
+        }
+        // North-south street trees stand in the planting verge between curb and sidewalk.
+        foreach(float x in NorthSouthStreets)
+        {
+            for(int z=-35;z<=130;z+=28)
+            {
+                TreeIfClear(parent,new Vector3(x-8.3f,.01f,z),.83f);
+                TreeIfClear(parent,new Vector3(x+8.3f,.01f,z+8f),.94f);
             }
         }
         // Flower beds at crossings and sidewalks.
@@ -420,19 +543,23 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         for(int i=0;i<12;i++)
         {
             float x=-132f+i*24f;
-            StreetLamp(parent,new Vector3(x,.0f,45.6f));
-            StreetLamp(parent,new Vector3(x,.0f,74.2f));
+            LampIfClear(parent,new Vector3(x,.0f,45.6f),Vector3.right);
+            // In the strip between the north sidewalk (to z=73.8) and the north cycle track (from z=74.1).
+            LampIfClear(parent,new Vector3(x,.0f,73.95f),Vector3.right);
         }
         for(int i=0;i<6;i++)
         {
             float z=-33f+i*30f;
-            StreetLamp(parent,new Vector3(-82f,.0f,z));
-            StreetLamp(parent,new Vector3(82f,.0f,z));
+            // z=57 and z=117 fall on the avenues' carriageways.
+            if(NearAny(z,EastWestStreets,7.3f))continue;
+            LampIfClear(parent,new Vector3(-82f,.0f,z),Vector3.forward);
+            LampIfClear(parent,new Vector3(82f,.0f,z),Vector3.forward);
         }
         Sign(parent,"Speed Limit 30","30",new Vector3(18f,0f,69f),Quaternion.Euler(0f,180f,0f),2.4f);
         Sign(parent,"Pedestrian Crossing","PEDESTRIAN\nCROSSING",new Vector3(13f,0f,52.0f),Quaternion.identity,2.1f);
         Sign(parent,"District Direction","DEALERSHIP  ←\nMARKET  →",new Vector3(-7f,0f,52.0f),Quaternion.identity,2.3f);
-        Sign(parent,"Northbound Direction","CENTRE  ↑",new Vector3(101f,0f,83f),Quaternion.Euler(0f,-90f,0f),2.2f);
+        // On the east verge of the x=96 street, between its curb (x 102.5-102.8) and sidewalk (from x=105.8).
+        Sign(parent,"Northbound Direction","CENTRE  ↑",new Vector3(104.3f,0f,83f),Quaternion.Euler(0f,-90f,0f),2.2f);
         for(int side=-1;side<=1;side+=2)
         {
             float x=1f+side*10.6f;
@@ -458,11 +585,13 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     {
         Transform signalGroup=Group("Signalized Intersections",parent);
         var signals=new List<ExteriorTrafficSignal>();
-        signals.Add(BuildSignal(signalGroup,"Central Pedestrian Crossing Signal",1f,60f,0f));
-        signals.Add(BuildSignal(signalGroup,"West South Junction Signal",-96f,60f,5f));
-        signals.Add(BuildSignal(signalGroup,"East South Junction Signal",96f,60f,10f));
-        signals.Add(BuildSignal(signalGroup,"West North Junction Signal",-96f,118f,15f));
-        signals.Add(BuildSignal(signalGroup,"East North Junction Signal",96f,118f,20f));
+        // Walk signals stand on sidewalks: south of the dealership crossing, and on the east north-south sidewalk at each junction.
+        Vector3 junctionWalkSignal=new Vector3(10.2f,0f,-7.4f);
+        signals.Add(BuildSignal(signalGroup,"Central Pedestrian Crossing Signal",1f,60f,0f,new Vector3(8.2f,0f,-10.3f)));
+        signals.Add(BuildSignal(signalGroup,"West South Junction Signal",-96f,60f,5f,junctionWalkSignal));
+        signals.Add(BuildSignal(signalGroup,"East South Junction Signal",96f,60f,10f,junctionWalkSignal));
+        signals.Add(BuildSignal(signalGroup,"West North Junction Signal",-96f,118f,15f,junctionWalkSignal));
+        signals.Add(BuildSignal(signalGroup,"East North Junction Signal",96f,118f,20f,junctionWalkSignal));
 
         Transform routes=Group("Traffic Routes",parent);
         Transform[] route=BuildLoopRoute(routes);
@@ -496,13 +625,14 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         Transform[] cycleRoute=CreatePath(cyclists,"Avenue Cycle Track Route",new Vector3[]{
             new Vector3(-128f,0f,54.4f),new Vector3(128f,0f,54.4f),new Vector3(128f,0f,75f),new Vector3(-128f,0f,75f)
         },true);
-        CreateCyclist(cyclists,"Commuter Cyclist",cycleRoute,0,new Color(.22f,.34f,.48f));
-        CreateCyclist(cyclists,"Second Commuter Cyclist",cycleRoute,cycleRoute.Length/2,new Color(.57f,.23f,.13f));
+        CreateCyclist(cyclists,"Commuter Cyclist",cycleRoute,0,signals.ToArray());
+        CreateCyclist(cyclists,"Second Commuter Cyclist",cycleRoute,cycleRoute.Length/2,signals.ToArray());
 
         BuildPedestrians(parent,signals[0]);
+        ApplyCrowdLooks(parent);
     }
 
-    private ExteriorTrafficSignal BuildSignal(Transform parent,string name,float x,float z,float phaseOffset)
+    private ExteriorTrafficSignal BuildSignal(Transform parent,string name,float x,float z,float phaseOffset,Vector3 walkSignalOffset)
     {
         GameObject root=new GameObject(name);
         root.transform.SetParent(parent,false);
@@ -510,15 +640,15 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         ExteriorTrafficSignal signal=root.AddComponent<ExteriorTrafficSignal>();
         var ewReds=new List<Renderer>(); var ewAmbers=new List<Renderer>(); var ewGreens=new List<Renderer>();
         var nsReds=new List<Renderer>(); var nsAmbers=new List<Renderer>(); var nsGreens=new List<Renderer>();
-        SignalHead(parent,new Vector3(x-7.15f,0f,z-7.3f),270f,ewReds,ewAmbers,ewGreens);
-        SignalHead(parent,new Vector3(x+7.15f,0f,z+7.3f),90f,ewReds,ewAmbers,ewGreens);
-        SignalHead(parent,new Vector3(x+7.3f,0f,z-7.15f),180f,nsReds,nsAmbers,nsGreens);
-        SignalHead(parent,new Vector3(x-7.3f,0f,z+7.15f),0f,nsReds,nsAmbers,nsGreens);
-        Vector3 pedPos=new Vector3(x+8.2f,.0f,z-5.5f);
-        Cylinder(parent,"Pedestrian Signal Post",pedPos+Vector3.up*1.25f,.07f,2.5f,metal);
-        Box(parent,"Pedestrian Signal Housing",pedPos+new Vector3(0f,2.1f,0f),new Vector3(.42f,.76f,.30f),facadeGraphite,false);
-        Renderer walk=Sphere(parent,"Walk Indicator",pedPos+new Vector3(0f,2.28f,.17f),.20f,walkOff,false);
-        Renderer wait=Sphere(parent,"Wait Indicator",pedPos+new Vector3(0f,1.90f,.17f),.20f,redOff,false);
+        SignalHead(root.transform,new Vector3(x-7.15f,0f,z-7.3f),270f,ewReds,ewAmbers,ewGreens);
+        SignalHead(root.transform,new Vector3(x+7.15f,0f,z+7.3f),90f,ewReds,ewAmbers,ewGreens);
+        SignalHead(root.transform,new Vector3(x+7.3f,0f,z-7.15f),180f,nsReds,nsAmbers,nsGreens);
+        SignalHead(root.transform,new Vector3(x-7.3f,0f,z+7.15f),0f,nsReds,nsAmbers,nsGreens);
+        Transform walkSignal=NewEmpty("Pedestrian Signal",root.transform); walkSignal.position=root.transform.position+walkSignalOffset;
+        Cylinder(walkSignal,"Pedestrian Signal Post",Vector3.up*1.25f,.07f,2.5f,metal);
+        Box(walkSignal,"Pedestrian Signal Housing",new Vector3(0f,2.1f,0f),new Vector3(.42f,.76f,.30f),facadeGraphite,false);
+        Renderer walk=Sphere(walkSignal,"Walk Indicator",new Vector3(0f,2.28f,.17f),.20f,walkOff,false);
+        Renderer wait=Sphere(walkSignal,"Wait Indicator",new Vector3(0f,1.90f,.17f),.20f,redOff,false);
         signal.Configure(ewReds.ToArray(),ewAmbers.ToArray(),ewGreens.ToArray(),nsReds.ToArray(),nsAmbers.ToArray(),nsGreens.ToArray(),
             redOn,redOff,amberOn,amberOff,greenOn,greenOff,phaseOffset,
             walk,wait,walkOn,walkOff,redOn,redOff);
@@ -528,7 +658,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     private void SignalHead(Transform parent,Vector3 position,float facingY,
         List<Renderer> reds,List<Renderer> ambers,List<Renderer> greens)
     {
-        Transform head=Group("Signal Head",parent);head.position=position;head.rotation=Quaternion.Euler(0f,facingY,0f);
+        Transform head=NewEmpty("Signal Head",parent);head.position=position;head.rotation=Quaternion.Euler(0f,facingY,0f);
         Cylinder(head,"Signal Mast",new Vector3(0f,3.1f,0f),.105f,6.2f,metal);
         Box(head,"Signal Head Housing",new Vector3(0f,5.1f,0f),new Vector3(.47f,1.53f,.38f),facadeGraphite,false);
         reds.Add(Sphere(head,"Red Traffic Lamp",new Vector3(0f,5.60f,.205f),.28f,redOff,false));
@@ -536,16 +666,17 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         greens.Add(Sphere(head,"Green Traffic Lamp",new Vector3(0f,4.60f,.205f),.28f,greenOff,false));
     }
 
+    // Both loops keep right of the centre lines, the perimeter loop on the outer side of each street and the counterflow loop on the inner side.
     private Transform[] BuildLoopRoute(Transform parent)
     {
-        Vector3[] corners={new Vector3(-96f,0f,58.4f),new Vector3(96f,0f,58.4f),new Vector3(97.6f,0f,118f),new Vector3(-97.6f,0f,118f)};
+        Vector3[] corners={new Vector3(-97.6f,0f,58.4f),new Vector3(97.6f,0f,58.4f),new Vector3(97.6f,0f,119.6f),new Vector3(-97.6f,0f,119.6f)};
         Transform[] points=CreatePath(parent,"Perimeter Traffic Loop",corners,true,8);
         return points;
     }
 
     private Transform[] BuildReverseLoopRoute(Transform parent)
     {
-        Vector3[] corners={new Vector3(96f,0f,61.6f),new Vector3(-96f,0f,61.6f),new Vector3(-94.4f,0f,116f),new Vector3(94.4f,0f,116f)};
+        Vector3[] corners={new Vector3(94.4f,0f,61.6f),new Vector3(-94.4f,0f,61.6f),new Vector3(-94.4f,0f,116f),new Vector3(94.4f,0f,116f)};
         return CreatePath(parent,"Counterflow Traffic Loop",corners,true,8);
     }
 
@@ -557,21 +688,18 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private Transform[] CreatePath(Transform parent,string name,Vector3[] anchors,bool closed,int subdivisions=1)
     {
-        Transform route=Group(name,parent);
+        Transform route=NewEmpty(name,parent);
         List<Transform> points=new List<Transform>();
         int segments=closed?anchors.Length:anchors.Length-1;
+        // Straight legs between the anchors; a curve through only the corners would swing out of the streets.
         for(int i=0;i<segments;i++)
         {
-            Vector3 p0=anchors[(i-1+anchors.Length)%anchors.Length];
-            Vector3 p1=anchors[i];
-            Vector3 p2=anchors[(i+1)%anchors.Length];
-            Vector3 p3=anchors[(i+2)%anchors.Length];
+            Vector3 from=anchors[i];
+            Vector3 to=anchors[(i+1)%anchors.Length];
             for(int j=0;j<subdivisions;j++)
             {
-                float t=j/(float)subdivisions;
-                Vector3 p=closed?Catmull(p0,p1,p2,p3,t):Vector3.Lerp(p1,p2,t);
                 Transform node=NewEmpty("Waypoint "+points.Count,route);
-                node.position=p;
+                node.position=Vector3.Lerp(from,to,j/(float)subdivisions);
                 points.Add(node);
             }
         }
@@ -584,20 +712,15 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         return points.ToArray();
     }
 
-    private static Vector3 Catmull(Vector3 p0,Vector3 p1,Vector3 p2,Vector3 p3,float t)
-    {
-        float t2=t*t,t3=t2*t;
-        return .5f*((2f*p1)+(-p0+p2)*t+(2f*p0-5f*p1+4f*p2-p3)*t2+(-p0+3f*p1-3f*p2+p3)*t3);
-    }
-
     private void BuildPedestrians(Transform parent,ExteriorTrafficSignal crossingSignal)
     {
         Transform group=Group("Walking Pedestrians",parent);
         GameObject prefab=AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Models/Presenter/Remy.fbx");
         if(prefab==null){Debug.LogWarning("Remy humanoid model is missing; pedestrian crowd was not generated.",this);return;}
+        // The two forecourt loops walk around the bench, bin and bike racks at x=1±10.6.
         Vector3[][] paths={
-            new[]{new Vector3(-11f,0f,26f),new Vector3(-9f,0f,26f),new Vector3(-9f,0f,42f),new Vector3(-11f,0f,42f)},
-            new[]{new Vector3(13f,0f,26f),new Vector3(11f,0f,26f),new Vector3(11f,0f,42f),new Vector3(13f,0f,42f)},
+            new[]{new Vector3(-12f,0f,26f),new Vector3(-7.5f,0f,26f),new Vector3(-7.5f,0f,42f),new Vector3(-12f,0f,42f)},
+            new[]{new Vector3(14f,0f,26f),new Vector3(9.5f,0f,26f),new Vector3(9.5f,0f,42f),new Vector3(14f,0f,42f)},
             new[]{new Vector3(-81f,0f,46f),new Vector3(-25f,0f,46f),new Vector3(-25f,0f,47f),new Vector3(-81f,0f,47f)},
             new[]{new Vector3(24f,0f,46f),new Vector3(81f,0f,46f),new Vector3(81f,0f,47f),new Vector3(24f,0f,47f)},
             new[]{new Vector3(-114f,0f,70f),new Vector3(-114f,0f,73f),new Vector3(-55f,0f,73f),new Vector3(-55f,0f,70f)},
@@ -629,12 +752,79 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         }
     }
 
-    private void CreateCyclist(Transform parent,string name,Transform[] route,int startIndex,Color clothing)
+    // Every walker and rider is a Remy.fbx instance. Each one wears its own top, bottoms, shoes, hair colour and skin tone: textured
+    // URP Lit materials that Aurelle > Realism > Upgrade People keeps in Assets/Materials/Realism/People/Crowd as
+    // Crowd_<Top|Bottoms|Shoes|Hair|Skin>_<name>.mat. Eyes and eyelashes share Remy's own materials; a missing material keeps the model's.
+    private const string PeopleMaterialFolder="Assets/Materials/Realism/People";
+    // Top, bottoms, shoes, hair, skin; one look per pedestrian (Pedestrian 1..8) and per rider, in hierarchy order.
+    private static readonly string[][] PedestrianLooks={
+        new[]{"White","Denim","Classic","DarkBrown","Light"},
+        new[]{"Navy","Khaki","Tan","Black","Medium"},
+        new[]{"HeatherGrey","Black","Dark","Chestnut","Tan"},
+        new[]{"Burgundy","DarkDenim","Classic","Black","Deep"},
+        new[]{"Olive","Grey","Dark","Blond","Light"},
+        new[]{"Charcoal","Khaki","Classic","DarkBrown","Tan"},
+        new[]{"SkyBlue","DarkDenim","Dark","Ash","Light"},
+        new[]{"Mustard","Black","Classic","Black","Medium"}
+    };
+    private static readonly string[][] CyclistLooks={
+        new[]{"SteelBlue","Black","Dark","DarkBrown","Medium"},
+        new[]{"Rust","Grey","Classic","Auburn","Light"}
+    };
+
+    /// <summary>Dresses every pedestrian and cyclist rider under <paramref name="root"/> in its crowd look (saved material
+    /// assignments) and returns the number of renderers changed.</summary>
+    public static int ApplyCrowdLooks(Transform root)
+    {
+        if(root==null)return 0;
+        int changed=0;
+        ExteriorPedestrianAgent[] walkers=root.GetComponentsInChildren<ExteriorPedestrianAgent>(true);
+        for(int i=0;i<walkers.Length;i++) changed+=ApplyCrowdLook(walkers[i].gameObject,PedestrianLooks[i%PedestrianLooks.Length]);
+        ExteriorCyclistAgent[] riders=root.GetComponentsInChildren<ExteriorCyclistAgent>(true);
+        for(int i=0;i<riders.Length;i++)
+        {
+            Transform rider=riders[i].transform.Find("Cyclist Rider");
+            if(rider!=null) changed+=ApplyCrowdLook(rider.gameObject,CyclistLooks[i%CyclistLooks.Length]);
+        }
+        return changed;
+    }
+
+    private static int ApplyCrowdLook(GameObject person,string[] look)
+    {
+        int changed=0;
+        foreach(SkinnedMeshRenderer part in person.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+        {
+            string material;
+            switch(part.name)
+            {
+                case "Tops": material="Crowd/Crowd_Top_"+look[0]; break;
+                case "Bottoms": material="Crowd/Crowd_Bottoms_"+look[1]; break;
+                case "Shoes": material="Crowd/Crowd_Shoes_"+look[2]; break;
+                case "Hair": material="Crowd/Crowd_Hair_"+look[3]; break;
+                case "Body": material="Crowd/Crowd_Skin_"+look[4]; break;
+                case "Eyes": material="People_Remy_Eyes"; break;
+                case "Eyelashes": material="People_Remy_Eyelashes"; break;
+                default: continue;
+            }
+            Material shared=AssetDatabase.LoadAssetAtPath<Material>(PeopleMaterialFolder+"/"+material+".mat");
+            // The eyeballs and lashes sit inside the head: their shadows only speckle the face.
+            UnityEngine.Rendering.ShadowCastingMode shadows=part.name=="Eyes"||part.name=="Eyelashes"?UnityEngine.Rendering.ShadowCastingMode.Off:UnityEngine.Rendering.ShadowCastingMode.On;
+            if((shared==null||part.sharedMaterial==shared)&&part.shadowCastingMode==shadows)continue;
+            Undo.RecordObject(part,"Apply Crowd Look");
+            if(shared!=null)part.sharedMaterial=shared;
+            part.shadowCastingMode=shadows;
+            PrefabUtility.RecordPrefabInstancePropertyModifications(part);
+            changed++;
+        }
+        return changed;
+    }
+
+    private void CreateCyclist(Transform parent,string name,Transform[] route,int startIndex,ExteriorTrafficSignal[] signals)
     {
         GameObject root=new GameObject(name);
         root.transform.SetParent(parent,false);
         root.transform.position=route[startIndex].position;
-        Transform bike=Group("Bicycle",root.transform);
+        Transform bike=NewEmpty("Bicycle",root.transform);
         MeshObject("Rear Alloy Wheel",bike,bicycleWheelMesh,tire,new Vector3(0f,.40f,-.85f),false,false).transform.localRotation=Quaternion.Euler(0f,0f,90f);
         MeshObject("Front Alloy Wheel",bike,bicycleWheelMesh,tire,new Vector3(0f,.40f,.85f),false,false).transform.localRotation=Quaternion.Euler(0f,0f,90f);
         Cylinder(bike,"Rear Wheel Hub",new Vector3(0f,.40f,-.85f),.12f,.16f,wheelMetal,new Vector3(0f,0f,90f),false);
@@ -647,30 +837,40 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         Tube(bike,new Vector3(0f,1.02f,-.42f),new Vector3(0f,.40f,-.85f),.045f,metal,false);
         Tube(bike,new Vector3(0f,.95f,.46f),new Vector3(0f,.40f,.85f),.052f,metal,false);
         Tube(bike,new Vector3(0f,.95f,.46f),new Vector3(0f,1.22f,.57f),.04f,metal,false);
-        Cylinder(bike,"Saddle",new Vector3(0f,1.08f,-.45f),.09f,.28f,tire,null,false);
-        Cylinder(bike,"Handlebar",new Vector3(0f,1.22f,.57f),.045f,.52f,metal,new Vector3(0f,0f,90f),false);
+        // A swept-back stem brings the bar within reach of the rider leaning forward: centre (0,1.20,0.24), grips at about x=±0.22.
+        Tube(bike,new Vector3(0f,1.22f,.57f),new Vector3(0f,1.20f,.24f),.04f,metal,false);
+        // A seat post rises from the seat cluster into a rounded saddle; the rider's pelvis sits on its top at (0,1.18,-0.36).
+        // The saddle stays inside the seated rider's shorts, clear of the shirt hanging over the thighs.
+        Tube(bike,new Vector3(0f,1.0f,-.42f),new Vector3(0f,1.14f,-.42f),.032f,metal,false);
+        GameObject saddle=GameObject.CreatePrimitive(PrimitiveType.Sphere); saddle.name="Saddle"; saddle.transform.SetParent(bike,false);
+        saddle.transform.localPosition=new Vector3(0f,1.155f,-.36f); saddle.transform.localScale=new Vector3(.12f,.05f,.18f);
+        saddle.GetComponent<Renderer>().sharedMaterial=tire; DestroyImmediate(saddle.GetComponent<Collider>());
+        Cylinder(bike,"Handlebar",new Vector3(0f,1.20f,.24f),.045f,.52f,metal,new Vector3(0f,0f,90f),false);
+        // Bottom-bracket axle and one crank per side: the arm runs 0.14 m up its pivot's local Y to the pedal body, which sits
+        // outboard on its end. Each pivot turns about its local X; the cyclist agent keeps the pedal bodies level.
+        Cylinder(bike,"Bottom Bracket Axle",new Vector3(0f,.45f,-.08f),.035f,.26f,wheelMetal,new Vector3(0f,0f,90f),false);
         Transform leftPedal=NewEmpty("Left Pedal",bike); leftPedal.localPosition=new Vector3(-.12f,.45f,-.08f);
         Transform rightPedal=NewEmpty("Right Pedal",bike); rightPedal.localPosition=new Vector3(.12f,.45f,-.08f);
-        Cylinder(leftPedal,"Pedal",new Vector3(-.10f,0f,0f),.035f,.20f,tire);
-        Cylinder(rightPedal,"Pedal",new Vector3(.10f,0f,0f),.035f,.20f,tire);
+        foreach(Transform crank in new[]{leftPedal,rightPedal})
+        {
+            float side=Mathf.Sign(crank.localPosition.x);
+            Box(crank,"Crank Arm",new Vector3(0f,.07f,0f),new Vector3(.025f,.17f,.035f),wheelMetal,false,null,false);
+            Box(crank,"Pedal",new Vector3(side*.05f,.14f,0f),new Vector3(.08f,.022f,.06f),tire,false,null,false);
+        }
 
         GameObject prefab=AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Models/Presenter/Remy.fbx");
         if(prefab!=null)
         {
             GameObject rider=(GameObject)PrefabUtility.InstantiatePrefab(prefab,root.transform);
             rider.name="Cyclist Rider";
-            rider.transform.localPosition=new Vector3(0f,.38f,-.12f);
-            rider.transform.localScale=Vector3.one*.36f;
+            // A 1.7 m rider fits this frame: seated on the saddle, its legs reach the pedals with the knee bending about 30-105
+            // degrees over a turn. The agent then moves the Hips bone onto the saddle's top and poses the rider.
+            rider.transform.localPosition=new Vector3(0f,.27f,-.35f);
+            rider.transform.localScale=Vector3.one*.45f;
             Animator anim=rider.GetComponent<Animator>(); if(anim!=null)anim.runtimeAnimatorController=null;
-            foreach(Renderer renderer in rider.GetComponentsInChildren<Renderer>(true))
-            {
-                if(renderer.name.ToLowerInvariant().Contains("top"))
-                {
-                    MaterialPropertyBlock block=new MaterialPropertyBlock(); renderer.GetPropertyBlock(block); block.SetColor("_BaseColor",clothing); renderer.SetPropertyBlock(block);
-                }
-            }
+            // The rider's outfit is a saved material assignment (CyclistLooks, applied by ApplyCrowdLooks): a property block would not be saved with the scene.
             ExteriorCyclistAgent agent=root.AddComponent<ExteriorCyclistAgent>();
-            agent.Configure(route,4.2f,rider.transform,leftPedal,rightPedal,FindObjectsByType<ExteriorTrafficSignal>(FindObjectsSortMode.None));
+            agent.Configure(route,4.2f,rider.transform,leftPedal,rightPedal,signals);
             agent.SetStartIndex(startIndex+1);
         }
     }
@@ -696,7 +896,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         return root;
     }
 
-    private GameObject BuildTrafficVehiclePrefab(string modelPath,string prefabName)
+    private GameObject BuildTrafficVehiclePrefab(string modelPath,string prefabName,float noseYaw)
     {
         GameObject modelAsset=AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
         if(modelAsset==null)
@@ -710,11 +910,13 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         if(model==null){DestroyImmediate(temporaryRoot);return null;}
         model.name="Imported Vehicle Model";
         model.transform.SetParent(temporaryRoot.transform,false);
+        // Turn the model nose-first before measuring, so it is centred on the root after the turn.
+        model.transform.localRotation=Quaternion.Euler(0f,noseYaw,0f)*model.transform.localRotation;
         Bounds bounds=CombinedRendererBounds(model);
         if(bounds.size.z<=.001f){DestroyImmediate(temporaryRoot);return null;}
         model.transform.localScale=Vector3.one*(4.5f/bounds.size.z);
         bounds=CombinedRendererBounds(model);
-        model.transform.localPosition=new Vector3(-bounds.center.x,-bounds.min.y,-bounds.center.z);
+        model.transform.localPosition-=new Vector3(bounds.center.x,bounds.min.y,bounds.center.z);
         GameObject saved=PrefabUtility.SaveAsPrefabAsset(temporaryRoot,path);
         DestroyImmediate(temporaryRoot);
         return saved;
@@ -760,8 +962,9 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void Tree(Transform parent,Vector3 p,float size)
     {
-        Transform root=Group("Street Tree",parent);
+        Transform root=NewEmpty("Street Tree",parent);
         root.position=p;
+        plantedTrees.Add(p);
         Cylinder(root,"Tapered Tree Trunk",new Vector3(0f,2.0f,0f),.48f,4.0f,trunk);
         for(int i=0;i<3;i++)
         {
@@ -770,17 +973,32 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         }
     }
 
-    private void TreeIfClear(Transform parent,Vector3 p,float size,BoxCollider[] buildings)
+    private void TreeIfClear(Transform parent,Vector3 p,float size)
     {
-        for(int i=0;i<buildings.Length;i++)
-        {
-            BoxCollider building=buildings[i];
-            if(building==null)continue;
-            Bounds bounds=building.bounds;
-            bounds.Expand(new Vector3(5f,0f,5f));
-            if(p.x>=bounds.min.x && p.x<=bounds.max.x && p.z>=bounds.min.z && p.z<=bounds.max.z)return;
-        }
+        // Footprints rather than collider bounds, which stay empty while the district root is inactive.
+        if(NearBuilding(p,2.5f))return;
+        if(OnPavement(p,.6f))return;
+        for(int i=0;i<plantedTrees.Count;i++)
+            if((plantedTrees[i]-p).sqrMagnitude<3.5f*3.5f)return;
         Tree(parent,p,size);
+    }
+
+    // Carriageways with their curbs, sidewalks (walking zone) and the other paved areas, widened by a clearance.
+    private static bool OnPavement(Vector3 p,float clearance)
+    {
+        foreach(float z in EastWestStreets)
+        {
+            float d=Mathf.Abs(p.z-z);
+            if(d<6.8f+clearance || (d>9.8f-clearance && d<13.8f+clearance))return true;
+        }
+        foreach(float x in NorthSouthStreets)
+        {
+            float d=Mathf.Abs(p.x-x);
+            if(d<6.8f+clearance || (d>9.8f-clearance && d<13.8f+clearance))return true;
+        }
+        foreach(Rect area in PavedAreas)
+            if(p.x>area.xMin-clearance && p.x<area.xMax+clearance && p.z>area.yMin-clearance && p.z<area.yMax+clearance)return true;
+        return false;
     }
 
     private void AddShrub(Transform parent,Vector3 p,float size,Material mat)
@@ -788,21 +1006,34 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         Sphere(parent,"Trimmed Evergreen Shrub",p,new Vector3(size*1.15f,size*.72f,size),mat,false);
     }
 
+    // Poles keep 1.6 m from facades (canopies and balconies stand out up to 1.1 m), and the heads, which reach 1.56 m to +z,
+    // keep 0.3 m. A blocked lamp moves 2.5 m along its row, or is left out.
+    private void LampIfClear(Transform parent,Vector3 position,Vector3 along)
+    {
+        foreach(float shift in new[]{0f,2.5f,-2.5f})
+        {
+            Vector3 p=position+along*shift;
+            if(NearBuilding(p,1.6f) || NearBuilding(p+new Vector3(0f,0f,1.56f),.3f))continue;
+            StreetLamp(parent,p);
+            return;
+        }
+    }
+
     private void StreetLamp(Transform parent,Vector3 position)
     {
-        Transform root=Group("Warm LED Street Lantern",parent);
+        Transform root=NewEmpty("Warm LED Street Lantern",parent);
         root.position=position;
         Cylinder(root,"Tapered Galvanized Pole",new Vector3(0f,4.35f,0f),.14f,8.7f,metal);
         Tube(root,new Vector3(0f,8.55f,0f),new Vector3(0f,8.95f,.92f),.08f,metal);
         Box(root,"LED Luminaire",new Vector3(0f,8.89f,.98f),new Vector3(.34f,.12f,1.15f),gold,false);
         GameObject lightObject=new GameObject("Warm Road LED");
         lightObject.transform.SetParent(root,false); lightObject.transform.localPosition=new Vector3(0f,8.75f,.98f);
-        Light light=lightObject.AddComponent<Light>(); light.type=LightType.Point; light.color=new Color(1f,.82f,.62f); light.intensity=180f; light.range=17f; light.shadows=LightShadows.None;
+        Light light=lightObject.AddComponent<Light>(); light.type=LightType.Point; light.color=new Color(1f,.82f,.62f); light.intensity=30f; light.range=17f; light.shadows=LightShadows.None;
     }
 
     private void Sign(Transform parent,string name,string text,Vector3 groundPosition,Quaternion rotation,float height)
     {
-        Transform root=Group(name,parent); root.position=groundPosition; root.rotation=rotation;
+        Transform root=NewEmpty(name,parent); root.position=groundPosition; root.rotation=rotation;
         Cylinder(root,"Road Sign Post",new Vector3(0f,height*.53f,0f),.075f,height*1.06f,metal);
         Box(root,"Enamel Sign Board",new Vector3(0f,height*.80f,0f),new Vector3(1.55f,.76f,.10f),signFace,false);
         CreateText(root,text,new Vector3(0f,height*.80f,.065f),Quaternion.identity,.16f,new Color(.94f,.88f,.72f),TextAlignment.Center,new Vector2(1.38f,.56f));
@@ -810,7 +1041,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void Bench(Transform parent,Vector3 p)
     {
-        Transform root=Group("Street Bench",parent); root.position=p;
+        Transform root=NewEmpty("Street Bench",parent); root.position=p;
         for(int i=0;i<4;i++) Box(root,"Oak Bench Slat",new Vector3(0f,.48f+i*.09f,((i%2)*.14f)-.08f),new Vector3(1.85f,.075f,.11f),facadeWarm,false);
         for(int side=-1;side<=1;side+=2)
         {
@@ -830,7 +1061,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     {
         for(int i=0;i<2;i++)
         {
-            Transform rack=Group("Inverted U Bicycle Rack",parent); rack.position=position+new Vector3((i-.5f)*.8f,0f,0f);
+            Transform rack=NewEmpty("Inverted U Bicycle Rack",parent); rack.position=position+new Vector3((i-.5f)*.8f,0f,0f);
             Tube(rack,new Vector3(-.32f,0f,0f),new Vector3(-.32f,.82f,0f),.035f,metal);
             Tube(rack,new Vector3(-.32f,.82f,0f),new Vector3(.32f,.82f,0f),.035f,metal);
             Tube(rack,new Vector3(.32f,.82f,0f),new Vector3(.32f,0f,0f),.035f,metal);
@@ -839,7 +1070,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void CreateArrow(Transform parent,Vector3 p,Quaternion rotation,float scale=1f)
     {
-        Transform arrow=Group("Directional Road Arrow",parent); arrow.position=p; arrow.rotation=rotation; arrow.localScale=Vector3.one*scale;
+        Transform arrow=NewEmpty("Directional Road Arrow",parent); arrow.position=p; arrow.rotation=rotation; arrow.localScale=Vector3.one*scale;
         Box(arrow,"Arrow Stem",new Vector3(0f,.0f,-.30f),new Vector3(.18f,.012f,.85f),roadLine,false);
         Box(arrow,"Arrow Head",new Vector3(0f,.0f,.15f),new Vector3(.72f,.012f,.16f),roadLine,false);
         Box(arrow,"Arrow Left Wing",new Vector3(-.24f,.0f,.30f),new Vector3(.16f,.012f,.50f),roadLine,false,new Vector3(0f,-34f,0f));
@@ -850,6 +1081,9 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     {
         const string skyTexturePath="Assets/Environment/HDRI/Kloppenheim_06_PureSky_2K.hdr";
         const string skyMaterialPath=MaterialFolder+"/Kloppenheim_Sunset_Skybox.mat";
+        // RenderSettings exposes its scene object only internally; record it so the lighting change can be undone.
+        MethodInfo renderSettingsObject=typeof(RenderSettings).GetMethod("GetRenderSettings",BindingFlags.Static|BindingFlags.NonPublic);
+        if(renderSettingsObject?.Invoke(null,null) is UnityEngine.Object renderSettings) Undo.RecordObject(renderSettings,"Configure Exterior Daylight");
         Texture2D skyTexture=AssetDatabase.LoadAssetAtPath<Texture2D>(skyTexturePath);
         Shader panoramic=Shader.Find("Skybox/Panoramic");
         if(skyTexture!=null && panoramic!=null)
@@ -880,7 +1114,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         Light sun=GameObject.Find("Exterior Daylight")==null?null:GameObject.Find("Exterior Daylight").GetComponent<Light>();
         if(sun==null)
         {
-            GameObject go=new GameObject("Exterior Daylight"); go.transform.SetParent(transform,false); go.transform.rotation=Quaternion.Euler(48f,-30f,0f);
+            GameObject go=new GameObject("Exterior Daylight"); Undo.RegisterCreatedObjectUndo(go,"Build Exterior Environment"); go.transform.SetParent(transform,false); go.transform.rotation=Quaternion.Euler(48f,-30f,0f);
             sun=go.AddComponent<Light>(); sun.type=LightType.Directional; sun.color=new Color(1f,.84f,.68f); sun.intensity=1.12f; sun.shadows=LightShadows.Soft; sun.shadowStrength=.72f;
             go.transform.rotation=Quaternion.Euler(18f,-30f,0f);
         }
@@ -899,6 +1133,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         EditorGUIUtility.SetIconForObject(point.gameObject,EditorGUIUtility.IconContent("sv_label_0").image as Texture2D);
     }
 
+    // Shared containers only: reuses an existing child of that name. Every individual object uses NewEmpty.
     private Transform Group(string name,Transform parent)
     {
         Transform existing=parent.Find(name);
@@ -960,9 +1195,11 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         mesh.fontSize=100; mesh.characterSize=size; mesh.anchor=TextAnchor.MiddleCenter; mesh.alignment=alignment; mesh.color=color; mesh.lineSpacing=1.1f;
         MeshRenderer renderer=go.GetComponent<MeshRenderer>(); renderer.shadowCastingMode=UnityEngine.Rendering.ShadowCastingMode.Off; renderer.receiveShadows=false;
         Bounds bounds=renderer.bounds;
-        if(maxBounds.x>0f && maxBounds.y>0f && bounds.size.x>0.001f && bounds.size.y>0.001f)
+        // World bounds: under a parent turned ±90 degrees the text's width lies along z.
+        float width=Mathf.Max(bounds.size.x,bounds.size.z);
+        if(maxBounds.x>0f && maxBounds.y>0f && width>0.001f && bounds.size.y>0.001f)
         {
-            float fit=Mathf.Min(maxBounds.x/bounds.size.x,maxBounds.y/bounds.size.y)*.90f;
+            float fit=Mathf.Min(maxBounds.x/width,maxBounds.y/bounds.size.y)*.90f;
             go.transform.localScale=Vector3.one*fit;
         }
     }
@@ -1008,6 +1245,16 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         EditorUtility.SetDirty(mat); materials[name]=mat; return mat;
     }
 
+    // Concrete tiled to one sidewalk run's length, keeping the 2 m tiles of a full-length sidewalk.
+    private Material SidewalkMaterial(float length,bool alongX)
+    {
+        string name=(alongX?"Sidewalk Concrete ":"Sidewalk Concrete Vertical ")+Mathf.RoundToInt(length)+"m";
+        if(materials.TryGetValue(name,out Material cached))return cached;
+        Material mat=Mat(name,new Color(.72f,.72f,.69f),.02f,.36f,"ConcreteFine",alongX?new Vector2(length*.5f,2f):new Vector2(2f,length*.5f));
+        ApplyPbrMaps(mat,"granular_concrete_diff_2k.jpg","granular_concrete_nor_dx_2k.jpg","granular_concrete_metallic_smoothness.png",.32f,.52f);
+        return mat;
+    }
+
     private void ApplyPbrMaps(Material material,string baseColorFile,string normalFile,string smoothnessFile,float normalStrength,float scalarSmoothness)
     {
         string root="Assets/Environment/Textures/PolyHaven/";
@@ -1036,7 +1283,13 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     private Material Emissive(string name,Color color,float strength)
     {
         Material mat=Mat(name,color,.0f,.6f);
-        if(mat.HasProperty("_EmissionColor")){mat.EnableKeyword("_EMISSION");mat.SetColor("_EmissionColor",color*strength);EditorUtility.SetDirty(mat);}
+        if(mat.HasProperty("_EmissionColor"))
+        {
+            mat.EnableKeyword("_EMISSION");mat.SetColor("_EmissionColor",color*strength);
+            // A new material defaults to EmissiveIsBlack, and URP's material inspector then strips _EMISSION again.
+            mat.globalIlluminationFlags=MaterialGlobalIlluminationFlags.BakedEmissive;
+            EditorUtility.SetDirty(mat);
+        }
         return mat;
     }
 
@@ -1073,18 +1326,35 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     private Mesh BuildGroundMeshAsset()
     {
         Mesh mesh=new Mesh{name="Exterior City Ground Relief"};
-        int columns=33,rows=33; Vector3[] v=new Vector3[columns*rows];Vector2[] uv=new Vector2[v.Length];int[] tri=new int[(columns-1)*(rows-1)*6];
+        // The ground steps down to ShowroomGroundY exactly under the showroom floor.
+        List<float> xs=GroundLines(-210f,210f,ShowroomFloor.xMin,ShowroomFloor.xMax),zs=GroundLines(-130f,270f,ShowroomFloor.yMin,ShowroomFloor.yMax);
+        int x0=xs.IndexOf(ShowroomFloor.xMin)+1,x1=xs.IndexOf(ShowroomFloor.xMax),z0=zs.IndexOf(ShowroomFloor.yMin)+1,z1=zs.IndexOf(ShowroomFloor.yMax);
+        int columns=xs.Count,rows=zs.Count; Vector3[] v=new Vector3[columns*rows];Vector2[] uv=new Vector2[v.Length];int[] tri=new int[(columns-1)*(rows-1)*6];
         for(int z=0;z<rows;z++)for(int x=0;x<columns;x++)
         {
-            float wx=Mathf.Lerp(-210f,210f,x/(float)(columns-1));float wz=Mathf.Lerp(-130f,270f,z/(float)(rows-1));
+            float wx=xs[x];float wz=zs[z];
             float edge=Mathf.Max(Mathf.InverseLerp(125f,210f,Mathf.Abs(wx)),Mathf.Max(Mathf.InverseLerp(-75f,-130f,wz),Mathf.InverseLerp(150f,270f,wz)));
             float wave=(Mathf.PerlinNoise((wx+270f)*.018f,(wz+340f)*.021f)-.5f)*2f;
             float y=-.05f+Mathf.Pow(Mathf.Clamp01(edge),2.3f)*Mathf.Max(0f,wave)*1.15f;
-            int idx=z*columns+x;v[idx]=new Vector3(wx,y,wz);uv[idx]=new Vector2(x*4f,z*4f);
+            if(x>=x0 && x<=x1 && z>=z0 && z<=z1) y=ShowroomGroundY;
+            int idx=z*columns+x;v[idx]=new Vector3(wx,y,wz);uv[idx]=new Vector2((wx+210f)/420f*128f,(wz+130f)/400f*128f);
         }
         int n=0;for(int z=0;z<rows-1;z++)for(int x=0;x<columns-1;x++){int a=z*columns+x,b=a+1,c=a+columns,d=c+1;tri[n++]=a;tri[n++]=c;tri[n++]=b;tri[n++]=b;tri[n++]=c;tri[n++]=d;}
         mesh.vertices=v;mesh.uv=uv;mesh.triangles=tri;mesh.RecalculateNormals();mesh.RecalculateBounds();
+        // The step faces would tilt the normals they share with the flat ground around the floor.
+        Vector3[] normals=mesh.normals;
+        for(int z=z0-1;z<=z1+1;z++)for(int x=x0-1;x<=x1+1;x++)normals[z*columns+x]=Vector3.up;
+        mesh.normals=normals;
         return SaveMesh(mesh,"ExteriorCityGround.asset");
+    }
+
+    // 33 evenly spaced grid lines plus two copies of each floor edge: the outer copy stays at street level, the inner one drops.
+    private static List<float> GroundLines(float from,float to,float edgeMin,float edgeMax)
+    {
+        var lines=new List<float>{edgeMin,edgeMin,edgeMax,edgeMax};
+        for(int i=0;i<=32;i++)lines.Add(Mathf.Lerp(from,to,i/32f));
+        lines.Sort();
+        return lines;
     }
 
     private Mesh BuildHillMeshAsset()
