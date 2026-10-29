@@ -15,6 +15,11 @@ using UnityEngine.XR.Interaction.Toolkit.UI;
 /// the controller rays use. Created when an explorer registers in CarExplorerModels; nothing is saved in the scene.
 /// On the desktop the card's Inspect asks CarExplorerInspect for the inspect camera, and the HUD publishes the part
 /// of the view its panels leave free as CarExplorerModels.HudSafeViewport.
+/// The desktop layout keeps the middle of the view free: the tree folds into a STRUCTURE tab in the top bar and opens
+/// under it on a click or P; the card shows only for a selection, with
+/// its description cut to three lines ("More"); with nothing selected a small chip says what to do. In small windows
+/// (CarExplorerHudScaler.Compact) the panels are narrower, the tree shows fewer rows and the hint fewer keys. I, or
+/// the eye button beside the hint, hides every panel but the hint for the rest of the session.
 /// </summary>
 [DisallowMultipleComponent]
 public sealed class CarExplorerHud : MonoBehaviour
@@ -28,15 +33,27 @@ public sealed class CarExplorerHud : MonoBehaviour
     private const float Margin = 24f;
     private const float BarHeight = 48f;
     private const float Gap = 16f;
-    // The tree takes 22.5 % of the canvas width within these bounds (432 units at 1080p, 384 in small windows).
-    private const float TreeMinWidth = 384f;
-    private const float TreeMaxWidth = 448f;
-    private const float TreeWidthShare = 0.225f;
-    private const float CardWidth = 432f;
+    // The tree takes 20 % of the canvas width within these bounds (384 units at 1080p) and at most TreeRows rows.
+    private const float TreeMinWidth = 352f;
+    private const float TreeMaxWidth = 416f;
+    private const float TreeWidthShare = 0.2f;
+    private const int TreeRows = 14;
+    private const float CardWidth = 400f;
     private const float HintHeight = 40f;
     private const float ToastWidth = 528f;
     private const float HelpWidth = 760f;
     private const float CrumbMaxWidth = 280f;
+    private const float ControlHeight = 40f;
+    // Compact layout (CarExplorerHudScaler.Compact): tighter margins, narrower panels, fewer rows.
+    private const float CompactMargin = 16f;
+    private const float CompactGap = 12f;
+    private const float CompactTreeWidth = 300f;
+    private const int CompactTreeRows = 7;
+    private const float CompactCardWidth = 340f;
+    private const float CompactToastWidth = 440f;
+    private const float CompactControlHeight = 34f;
+    // The card's description shows this many lines until "More" is pressed (desktop).
+    private const int DescriptionLines = 3;
 
     // The XR plate: 1120 x 760 units of 0.95 mm (1.06 m wide; body text about 17 mm), at arm's length beside the car.
     private const float PlateWidth = 1120f;
@@ -89,6 +106,9 @@ public sealed class CarExplorerHud : MonoBehaviour
 
     // Tree and card.
     private CarExplorerHudTree tree;
+    private RectTransform treeTabPanel;
+    private CarExplorerHudButton treeTab;
+    private Image treeTabChevron;
     private RectTransform cardPanel;
     private TextMeshProUGUI cardKind;
     private RectTransform cardStatus;
@@ -97,8 +117,14 @@ public sealed class CarExplorerHud : MonoBehaviour
     private TextMeshProUGUI cardContext;
     private TextMeshProUGUI cardDescription;
     private LayoutElement cardDescriptionLayout;
-    private readonly TextMeshProUGUI[] propertyKeys = new TextMeshProUGUI[3];
-    private readonly TextMeshProUGUI[] propertyValues = new TextMeshProUGUI[3];
+    private TextMeshProUGUI descriptionProbe;
+    private CarExplorerHudButton cardMore;
+    private bool descriptionExpanded;
+    private CarStructureNode descriptionNode;
+    private CarExplorerHudButton cardClose;
+    private TextMeshProUGUI cardFacts;
+    private static readonly string FactsValueColour = ColorUtility.ToHtmlStringRGB(CarExplorerHudStyle.TextPrimary);
+    private VerticalLayoutGroup cardLayout;
     private RectTransform cardActions;
     private RectTransform cardPrimaryRow;
     private RectTransform cardSecondaryRow;
@@ -108,6 +134,13 @@ public sealed class CarExplorerHud : MonoBehaviour
     private CarExplorerHudButton cardPutBack;
     private CarExplorerHudButton cardReset;
     private CanvasGroup cardGroup;
+
+    // The chip shown instead of a card while nothing is selected, and the eye button that hides the panels.
+    private RectTransform chipPanel;
+    private TextMeshProUGUI chipText;
+    private CarExplorerHudButton chipReset;
+    private RectTransform panelsButtonPanel;
+    private CarExplorerHudButton panelsButton;
 
     // Hint, toast and help.
     private RectTransform hintPanel;
@@ -147,6 +180,14 @@ public sealed class CarExplorerHud : MonoBehaviour
     private Fader hintFader;
     private Fader toastFader;
     private Fader helpFader;
+    private Fader panelsButtonFader;
+
+    // Small windows get the compact layout; the visitor's choices last for the Play session.
+    private CarExplorerHudScaler scaler;
+    private bool compact;
+    private static bool panelsHidden;
+    private static bool treeChosen;
+    private static bool treeChosenOpen;
 
     // What the HUD last showed, so a Changed event only rebuilds what differs.
     private bool stateValid;
@@ -196,6 +237,12 @@ public sealed class CarExplorerHud : MonoBehaviour
     public Canvas ScreenCanvas => screenCanvas;
     public Canvas WorldCanvas => worldCanvas;
     public bool HelpOpen => helpOpen;
+    /// <summary>True while the visitor has hidden the desktop panels (I); kept for the Play session.</summary>
+    public bool PanelsHidden => panelsHidden;
+    /// <summary>True while the desktop uses the compact layout (a small window).</summary>
+    public bool Compact => compact;
+    /// <summary>True while the desktop STRUCTURE tree is open (not just its tab).</summary>
+    public bool TreeOpen => tree != null && !tree.Collapsed;
 
     // ------------------------------------------------------------------ creation
 
@@ -205,6 +252,9 @@ public sealed class CarExplorerHud : MonoBehaviour
         CarExplorerModels.CurrentChanged -= OnCurrentModelChanged;
         CarExplorerModels.PointerOverHud = false;
         instance = null;
+        panelsHidden = false;
+        treeChosen = false;
+        treeChosenOpen = false;
     }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
@@ -311,7 +361,7 @@ public sealed class CarExplorerHud : MonoBehaviour
         screenCanvas = screenObject.AddComponent<Canvas>();
         screenCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
         screenCanvas.sortingOrder = 40;
-        var scaler = screenObject.AddComponent<CarExplorerHudScaler>();
+        scaler = screenObject.AddComponent<CarExplorerHudScaler>();
         scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         scaler.referenceResolution = new Vector2(1920f, 1080f);
         scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
@@ -345,8 +395,11 @@ public sealed class CarExplorerHud : MonoBehaviour
         BuildViewSwitch();
         BuildLanguage();
         tree = new CarExplorerHudTree(this, workspace);
+        BuildTreeTab();
         BuildCard();
+        BuildChip();
         BuildHint();
+        BuildPanelsButton();
         BuildToast();
         BuildHelp();
         screenObject.SetActive(model != null);
@@ -438,6 +491,146 @@ public sealed class CarExplorerHud : MonoBehaviour
             x += width;
         }
         languagePanel.sizeDelta = new Vector2(x + 4f, BarHeight);
+    }
+
+    // The desktop's STRUCTURE tab, left in the top bar: the tree opens under it and closes again (P too).
+    private void BuildTreeTab()
+    {
+        treeTabPanel = CarExplorerHudStyle.Rect("Structure Tab", workspace, new Vector2(0f, 1f));
+        CarExplorerHudStyle.Panel(treeTabPanel, CarExplorerHudStyle.PanelFill, 12);
+        treeTab = CarExplorerHudButton.Create("Toggle", treeTabPanel, CarExplorerHudButton.Variant.Segment,
+            CarExplorerHudText.StructureTab.English, CarExplorerHudStyle.LabelSize, CarExplorerHudStyle.Icon("tree"), 8);
+        treeTab.SubtleSelection = true;
+        CarExplorerHudStyle.Stretch((RectTransform)treeTab.transform, 4f, 4f, 4f, 4f);
+        RectTransform iconRect = treeTab.Icon.rectTransform;
+        iconRect.anchorMin = iconRect.anchorMax = iconRect.pivot = new Vector2(0f, 0.5f);
+        iconRect.anchoredPosition = new Vector2(10f, 0f);
+        iconRect.sizeDelta = new Vector2(20f, 20f);
+        CarExplorerHudStyle.Stretch(treeTab.Label.rectTransform, 38f, 30f);
+        treeTab.Label.alignment = TextAlignmentOptions.MidlineLeft;
+        treeTabChevron = CarExplorerHudStyle.Image("Chevron", treeTab.transform, CarExplorerHudStyle.Icon("chevron"),
+            CarExplorerHudStyle.TextTertiary);
+        // Turned about its own centre: down while the tree is closed, up while it is open.
+        RectTransform chevron = treeTabChevron.rectTransform;
+        chevron.anchorMin = chevron.anchorMax = new Vector2(1f, 0.5f);
+        chevron.pivot = new Vector2(0.5f, 0.5f);
+        chevron.anchoredPosition = new Vector2(-16f, 0f);
+        chevron.sizeDelta = new Vector2(16f, 16f);
+        treeTab.Clicked = ToggleTree;
+    }
+
+    // The tab's width for its label in the current language.
+    private void RebuildTreeTab()
+    {
+        treeTab.Label.text = CarExplorerHudText.StructureTab.Get(Uzbek);
+        float width = Mathf.Ceil(treeTab.Label.GetPreferredValues(treeTab.Label.text, 4000f, 40f).x) + 38f + 30f + 8f;
+        treeTabPanel.sizeDelta = new Vector2(width, BarHeight);
+    }
+
+    private void ApplyTreeTabState()
+    {
+        bool open = !tree.Collapsed;
+        treeTab.Selected = open;
+        treeTabChevron.rectTransform.localEulerAngles = new Vector3(0f, 0f, open ? 90f : -90f);
+        treeTabChevron.color = open ? CarExplorerHudStyle.TextPrimary : CarExplorerHudStyle.TextTertiary;
+    }
+
+    /// <summary>Opens or closes the desktop STRUCTURE tree (the tab, P); the choice lasts for the session.</summary>
+    public void ToggleTree() => SetTreeOpen(tree.Collapsed);
+
+    public void SetTreeOpen(bool open)
+    {
+        treeChosen = true;
+        treeChosenOpen = open;
+        if (open && panelsHidden) SetPanelsHidden(false);
+        ApplyTreeRule();
+    }
+
+    // On the desktop only the tab shows until the visitor opens the tree (tab or P); then it stays as they left it.
+    // It does not open by itself for a selection, on any screen: its column would then have to stay out of the free
+    // view the explorer places parts in, and a taken-out assembly would go behind the car instead of beside it.
+    // The plate keeps its own header.
+    private void ApplyTreeRule()
+    {
+        if (model == null || xrLayout) return;
+        bool open = treeChosen && treeChosenOpen;
+        if (tree.Collapsed == open) tree.SetCollapsed(!open);
+        ApplyTreeTabState();
+        layoutDirty = true;
+    }
+
+    // While nothing is selected the desktop shows this chip instead of a card (with Reset when the car is not whole).
+    private void BuildChip()
+    {
+        chipPanel = CarExplorerHudStyle.Rect("Explore Chip", workspace, new Vector2(0f, 0f));
+        CarExplorerHudStyle.Panel(chipPanel, CarExplorerHudStyle.PanelFill, 12);
+        var layout = chipPanel.gameObject.AddComponent<HorizontalLayoutGroup>();
+        layout.padding = new RectOffset(16, 4, 4, 4);
+        layout.spacing = 10f;
+        layout.childAlignment = TextAnchor.MiddleLeft;
+        layout.childControlWidth = true;
+        layout.childControlHeight = true;
+        layout.childForceExpandWidth = false;
+        layout.childForceExpandHeight = false;
+        var fitter = chipPanel.gameObject.AddComponent<ContentSizeFitter>();
+        fitter.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+        chipText = CarExplorerHudStyle.Text("Text", chipPanel, CarExplorerHudStyle.LabelSize - 1f,
+            CarExplorerHudStyle.TextSecondary, FontStyles.Normal, TextAlignmentOptions.MidlineLeft);
+        CarExplorerHudStyle.Layout(chipText, -1f, 32f);
+        chipReset = CarExplorerHudButton.Create("Reset", chipPanel, CarExplorerHudButton.Variant.Secondary,
+            string.Empty, CarExplorerHudStyle.LabelSize - 1f, null, 8);
+        CarExplorerHudStyle.Layout(chipReset, 88f, 32f);
+        chipReset.Clicked = () => model?.ResetAll();
+        chipPanel.sizeDelta = new Vector2(200f, HintHeight);
+        chipPanel.gameObject.SetActive(false);
+    }
+
+    private void RebuildChip()
+    {
+        bool uzbek = Uzbek;
+        chipText.text = CarExplorerHudText.ExploreChip.Get(uzbek);
+        bool reset = model.TakenOut != null || model.View != CarExplorerView.Normal;
+        chipReset.gameObject.SetActive(reset);
+        if (reset)
+        {
+            chipReset.Label.text = CarExplorerHudText.Reset.Get(uzbek);
+            CarExplorerHudStyle.Layout(chipReset, chipReset.PreferredWidth(72f), 32f);
+        }
+        RectOffset padding = chipPanel.GetComponent<HorizontalLayoutGroup>().padding;
+        padding.right = reset ? 4 : 16;
+        layoutDirty = true;
+    }
+
+    // The eye beside the hint: hides every panel but the hint (I), and shows them again.
+    private void BuildPanelsButton()
+    {
+        panelsButtonPanel = CarExplorerHudStyle.Rect("Panels Toggle", screenRoot, new Vector2(1f, 0f));
+        CarExplorerHudStyle.Panel(panelsButtonPanel, CarExplorerHudStyle.PanelFill, 12);
+        panelsButtonPanel.sizeDelta = new Vector2(HintHeight + 8f, HintHeight);
+        panelsButton = CarExplorerHudButton.Create("Toggle", panelsButtonPanel, CarExplorerHudButton.Variant.Segment,
+            null, 0f, CarExplorerHudStyle.Icon("eye"), 8);
+        panelsButton.SubtleSelection = true;
+        CarExplorerHudStyle.Stretch((RectTransform)panelsButton.transform, 4f, 4f, 4f, 4f);
+        panelsButton.Icon.rectTransform.sizeDelta = new Vector2(24f, 24f);
+        panelsButton.Clicked = () => SetPanelsHidden(!panelsHidden);
+        panelsButtonFader = AddFader(panelsButtonPanel, false);
+        panelsButtonPanel.gameObject.SetActive(false);
+    }
+
+    /// <summary>Hides or shows the desktop panels (the eye button, I); the hint stays. Kept for the session.</summary>
+    public void SetPanelsHidden(bool hidden)
+    {
+        if (panelsHidden == hidden) return;
+        panelsHidden = hidden;
+        ApplyPanelsButton();
+        if (model != null && stateValid) RebuildHint();
+        layoutDirty = true;
+    }
+
+    private void ApplyPanelsButton()
+    {
+        panelsButton.Icon.sprite = CarExplorerHudStyle.Icon(panelsHidden ? "eye-off" : "eye");
+        panelsButton.Selected = panelsHidden;
     }
 
     private void RebuildViewSwitch()
@@ -543,6 +736,13 @@ public sealed class CarExplorerHud : MonoBehaviour
             total = Measure(foldEnd, count, padding, separatorWidth, ellipsisWidth, out lastWidth);
             if (foldEnd == count - 1) break;
         }
+        // Still too wide: the vehicle (always the first crumb) gives way first, then the node in view.
+        if (total > maxWidth && count > 1)
+        {
+            float shrink = Mathf.Min(total - maxWidth, Mathf.Max(0f, crumbWidths[0] - 72f));
+            crumbWidths[0] -= shrink;
+            total -= shrink;
+        }
         if (total > maxWidth) lastWidth = Mathf.Max(72f, lastWidth - (total - maxWidth));
 
         float x = padding;
@@ -624,13 +824,18 @@ public sealed class CarExplorerHud : MonoBehaviour
 
     private float BreadcrumbMaxWidth()
     {
-        // On the plate the switches sit together on the right; on the screen the view switch is centred.
+        // On the plate and in a small window the switches sit together on the right; otherwise the view switch is
+        // centred. The crumbs start right of the STRUCTURE tab on the desktop.
         if (xrLayout)
         {
             float switches = viewPanel.sizeDelta.x + languagePanel.sizeDelta.x;
             return Mathf.Max(240f, PlateWidth - Margin * 2f - switches - Gap * 2f);
         }
-        return Mathf.Max(240f, screenRoot.rect.width * 0.5f - viewPanel.sizeDelta.x * 0.5f - Gap - Margin);
+        float crumbLeft = breadcrumbPanel.anchoredPosition.x;
+        float viewLeft = Small
+            ? screenRoot.rect.width - CompactMargin - languagePanel.sizeDelta.x - CompactGap - viewPanel.sizeDelta.x
+            : screenRoot.rect.width * 0.5f - viewPanel.sizeDelta.x * 0.5f;
+        return Mathf.Max(160f, viewLeft - CurrentGap - crumbLeft);
     }
 
     /// <summary>
@@ -669,16 +874,17 @@ public sealed class CarExplorerHud : MonoBehaviour
         cardPanel = CarExplorerHudStyle.Rect("Card", workspace, new Vector2(1f, 1f));
         CarExplorerHudStyle.Panel(cardPanel, CarExplorerHudStyle.PanelFill);
         cardGroup = CarExplorerHudStyle.Group(cardPanel);
-        var layout = cardPanel.gameObject.AddComponent<VerticalLayoutGroup>();
-        layout.padding = new RectOffset(24, 24, 20, 24);
-        layout.spacing = 8f;
-        layout.childControlWidth = true;
-        layout.childControlHeight = true;
-        layout.childForceExpandWidth = true;
-        layout.childForceExpandHeight = false;
+        cardLayout = cardPanel.gameObject.AddComponent<VerticalLayoutGroup>();
+        cardLayout.padding = new RectOffset(24, 24, 20, 24);
+        cardLayout.spacing = 8f;
+        cardLayout.childControlWidth = true;
+        cardLayout.childControlHeight = true;
+        cardLayout.childForceExpandWidth = true;
+        cardLayout.childForceExpandHeight = false;
         var fitter = cardPanel.gameObject.AddComponent<ContentSizeFitter>();
         fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
+        // Kind, status chip and the close button (clears the selection).
         RectTransform header = CarExplorerHudStyle.Rect("Header", cardPanel);
         var headerLayout = header.gameObject.AddComponent<HorizontalLayoutGroup>();
         headerLayout.childControlWidth = true;
@@ -700,6 +906,11 @@ public sealed class CarExplorerHud : MonoBehaviour
             TextAlignmentOptions.Midline);
         cardStatusText.characterSpacing = 6f;
         CarExplorerHudStyle.Stretch(cardStatusText.rectTransform, 8f, 8f);
+        cardClose = CarExplorerHudButton.Create("Close", header, CarExplorerHudButton.Variant.Ghost, null, 0f,
+            CarExplorerHudStyle.Icon("close"), 8);
+        cardClose.Icon.rectTransform.sizeDelta = new Vector2(20f, 20f);
+        CarExplorerHudStyle.Layout(cardClose, 28f, 28f).minWidth = 28f;
+        cardClose.Clicked = () => model?.Select(null);
 
         cardTitle = CarExplorerHudStyle.Text("Title", cardPanel, CarExplorerHudStyle.TitleSize,
             CarExplorerHudStyle.TextPrimary, FontStyles.Bold, TextAlignmentOptions.TopLeft);
@@ -717,32 +928,40 @@ public sealed class CarExplorerHud : MonoBehaviour
         cardDescription.textWrappingMode = TextWrappingModes.Normal;
         cardDescription.lineSpacing = 6f;
         cardDescriptionLayout = CarExplorerHudStyle.Layout(cardDescription);
+        // Never drawn: measures the description against three lines (measuring the shown text would redraw it).
+        descriptionProbe = CarExplorerHudStyle.Text("Measure", workspace, CarExplorerHudStyle.BodySize,
+            CarExplorerHudStyle.Clear);
+        descriptionProbe.textWrappingMode = TextWrappingModes.Normal;
+        descriptionProbe.lineSpacing = 6f;
+        descriptionProbe.enabled = false;
 
-        RectTransform properties = CarExplorerHudStyle.Rect("Properties", cardPanel);
-        var propertiesLayout = properties.gameObject.AddComponent<VerticalLayoutGroup>();
-        propertiesLayout.spacing = 2f;
-        propertiesLayout.padding = new RectOffset(0, 0, 4, 4);
-        propertiesLayout.childControlWidth = true;
-        propertiesLayout.childControlHeight = true;
-        propertiesLayout.childForceExpandWidth = true;
-        propertiesLayout.childForceExpandHeight = false;
-        for (int i = 0; i < propertyKeys.Length; i++)
+        // "More" / "Less" under a description cut to three lines.
+        RectTransform moreRow = CarExplorerHudStyle.Rect("More", cardPanel);
+        var moreLayout = moreRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+        moreLayout.childControlWidth = true;
+        moreLayout.childControlHeight = true;
+        moreLayout.childForceExpandWidth = false;
+        moreLayout.childForceExpandHeight = false;
+        moreLayout.padding = new RectOffset(-8, 0, -4, 0);
+        cardMore = CarExplorerHudButton.Create("Toggle", moreRow, CarExplorerHudButton.Variant.Ghost, string.Empty,
+            CarExplorerHudStyle.LabelSize, null, 6);
+        cardMore.IdleContent = CarExplorerHudStyle.Accent;
+        cardMore.Label.fontStyle = FontStyles.Bold;
+        CarExplorerHudStyle.Stretch(cardMore.Label.rectTransform, 8f, 8f);
+        CarExplorerHudStyle.Layout(cardMore, 80f, 26f);
+        cardMore.Clicked = () =>
         {
-            RectTransform row = CarExplorerHudStyle.Rect("Property " + i, properties);
-            var rowLayout = row.gameObject.AddComponent<HorizontalLayoutGroup>();
-            rowLayout.childControlWidth = true;
-            rowLayout.childControlHeight = true;
-            rowLayout.childForceExpandWidth = false;
-            rowLayout.childForceExpandHeight = false;
-            rowLayout.spacing = 8f;
-            propertyKeys[i] = CarExplorerHudStyle.Text("Key", row, CarExplorerHudStyle.LabelSize,
-                CarExplorerHudStyle.TextTertiary, FontStyles.Normal, TextAlignmentOptions.TopLeft);
-            CarExplorerHudStyle.Layout(propertyKeys[i], 120f, 26f);
-            propertyValues[i] = CarExplorerHudStyle.Text("Value", row, CarExplorerHudStyle.LabelSize,
-                CarExplorerHudStyle.TextPrimary, FontStyles.Normal, TextAlignmentOptions.TopLeft);
-            propertyValues[i].textWrappingMode = TextWrappingModes.Normal;
-            CarExplorerHudStyle.Layout(propertyValues[i], -1f, -1f, 1f, 26f);
-        }
+            descriptionExpanded = !descriptionExpanded;
+            layoutDirty = true;
+        };
+        moreRow.gameObject.SetActive(false);
+
+        // Material and part count in one row ("Material  Steel  ·  7 parts"), wrapped between words if it must.
+        cardFacts = CarExplorerHudStyle.Text("Facts", cardPanel, CarExplorerHudStyle.LabelSize,
+            CarExplorerHudStyle.TextTertiary, FontStyles.Normal, TextAlignmentOptions.TopLeft);
+        cardFacts.textWrappingMode = TextWrappingModes.Normal;
+        cardFacts.richText = true;
+        cardFacts.lineSpacing = 4f;
 
         // Two rows: what to do with the node (take out or explode, inspect), then the way back (collapse, put back,
         // reset). Each row shows only when it has a button.
@@ -808,14 +1027,25 @@ public sealed class CarExplorerHud : MonoBehaviour
         bool uzbek = Uzbek;
         CarStructureNode node = CardNode;
         CarStructureNode root = model.Root;
-        CarStructureNode subject = node ?? root;
+        // The desktop shows a card only for a selection (the chip otherwise); the plate keeps the overview card.
+        CarStructureNode subject = node ?? (xrLayout ? root : null);
+        bool chip = !xrLayout && node == null && root != null;
+        if (chipPanel.gameObject.activeSelf != chip) chipPanel.gameObject.SetActive(chip);
+        if (chip) RebuildChip();
+        layoutDirty = true;
         if (subject == null)
         {
             cardPanel.gameObject.SetActive(false);
+            descriptionNode = null;
             return;
         }
         cardPanel.gameObject.SetActive(true);
         bool overview = node == null;
+        if (subject != descriptionNode)
+        {
+            descriptionNode = subject;
+            descriptionExpanded = false;
+        }
 
         int kind = Mathf.Clamp((int)subject.Kind, 0, CarExplorerHudText.Kinds.Length - 1);
         cardKind.text = CarExplorerHudText.Kinds[kind].Get(uzbek);
@@ -828,6 +1058,8 @@ public sealed class CarExplorerHud : MonoBehaviour
             float statusWidth = cardStatusText.GetPreferredValues(cardStatusText.text, 600f, 24f).x;
             CarExplorerHudStyle.Layout(cardStatus, Mathf.Ceil(statusWidth) + 18f, 22f);
         }
+        // × clears the selection; while inspecting the card shows the inspected node, left by Exit inspect instead.
+        cardClose.gameObject.SetActive(!overview && InspectTarget() == null);
 
         cardTitle.text = subject.Name(uzbek);
         cardContext.text = overview
@@ -842,38 +1074,40 @@ public sealed class CarExplorerHud : MonoBehaviour
         cardDescription.gameObject.SetActive(!string.IsNullOrEmpty(description));
         cardDescription.text = description ?? string.Empty;
 
-        int property = 0;
+        // Facts: the material (if any), then the units and parts it holds, in one row.
+        string material = overview || string.IsNullOrEmpty(subject.Material)
+            ? string.Empty
+            : CarExplorerHudText.MaterialName(subject.Material, uzbek);
+        string count = string.Empty;
         if (overview)
+            count = subject.Children.Count + CarExplorerHudText.SystemsSuffix.Get(uzbek) + "  ·  " +
+                    subject.PartCount + CarExplorerHudText.PartsSuffix.Get(uzbek);
+        else if (subject.Children.Count > 0)
+            count = (subject.Children.Count != subject.PartCount
+                        ? subject.Children.Count + CarExplorerHudText.UnitsSuffix.Get(uzbek) + "  ·  "
+                        : string.Empty) + subject.PartCount + CarExplorerHudText.PartsSuffix.Get(uzbek);
+        bool hasMaterial = material.Length > 0;
+        cardFacts.gameObject.SetActive(hasMaterial || count.Length > 0);
+        if (hasMaterial || count.Length > 0)
         {
-            SetProperty(property++, CarExplorerHudText.Systems.Get(uzbek), subject.Children.Count.ToString());
-            SetProperty(property++, CarExplorerHudText.Parts.Get(uzbek), subject.PartCount.ToString());
+            // The material in the primary colour (never parsed as markup); counts never break inside "182 parts".
+            string facts = hasMaterial
+                ? CarExplorerHudText.Material.Get(uzbek) + "  <color=#" + FactsValueColour + "><noparse>" + material +
+                  "</noparse></color>"
+                : string.Empty;
+            if (count.Length > 0)
+                facts += (hasMaterial ? "   ·   " : string.Empty) + count.Replace(' ', '\u00A0').Replace("\u00A0·\u00A0", " · ");
+            cardFacts.text = facts;
         }
-        else
-        {
-            if (!string.IsNullOrEmpty(subject.Material))
-                SetProperty(property++, CarExplorerHudText.Material.Get(uzbek),
-                    CarExplorerHudText.MaterialName(subject.Material, uzbek));
-            if (subject.Children.Count > 0)
-            {
-                SetProperty(property++, CarExplorerHudText.Parts.Get(uzbek), subject.PartCount.ToString());
-                if (subject.Children.Count != subject.PartCount)
-                    SetProperty(property++, CarExplorerHudText.Contains.Get(uzbek),
-                        subject.Children.Count + CarExplorerHudText.UnitsSuffix.Get(uzbek));
-            }
-        }
-        for (int i = 0; i < propertyKeys.Length; i++)
-            propertyKeys[i].transform.parent.gameObject.SetActive(i < property);
 
-        // A single part has nothing to take out or apart: its card shows no (disabled) Explode button.
-        bool leaf = subject.Children.Count == 0 &&
-                    !(subject.Kind == CarNodeKind.Assembly && model.TakenOut != subject);
-        bool movable = !overview && subject.Kind >= CarNodeKind.Assembly && !leaf;
+        // A node that cannot come apart (a part, a level already apart) offers no disabled Explode.
+        bool movable = !overview && subject.Kind >= CarNodeKind.Assembly && CanOpen(subject);
         cardOpen.gameObject.SetActive(movable);
         if (movable)
         {
             bool takeOut = subject.Kind == CarNodeKind.Assembly && model.TakenOut != subject;
             SetActionLabel(cardOpen, (takeOut ? CarExplorerHudText.TakeOut : CarExplorerHudText.Explode).Get(uzbek));
-            cardOpen.Interactable = CanOpen(subject);
+            cardOpen.Interactable = true;
         }
         // Inspect: the desktop's inspect camera frames the node; on the inspected node's card it walks on again.
         bool inspectable = !overview && !model.IsXr;
@@ -893,12 +1127,12 @@ public sealed class CarExplorerHud : MonoBehaviour
         bool reset = overview && (anyOut || model.View != CarExplorerView.Normal);
         cardReset.gameObject.SetActive(reset);
         if (reset) SetActionLabel(cardReset, CarExplorerHudText.Reset.Get(uzbek));
+        FitPrimaryActions(movable, inspectable);
         cardPrimaryRow.gameObject.SetActive(movable || inspectable);
         cardSecondaryRow.gameObject.SetActive(apart || anyOut || reset);
         cardActions.gameObject.SetActive(movable || inspectable || apart || anyOut || reset);
 
         if (animate && cardGroup.alpha > 0.5f) cardGroup.alpha = 0.35f;
-        layoutDirty = true;
     }
 
     // The node the inspect camera frames, or null (never in XR).
@@ -914,18 +1148,42 @@ public sealed class CarExplorerHud : MonoBehaviour
         else CarExplorerInspect.Request(node);
     }
 
-    private void SetProperty(int index, string key, string value)
-    {
-        propertyKeys[index].text = key;
-        propertyValues[index].text = value;
-    }
-
     private static void SetActionLabel(CarExplorerHudButton button, string label)
     {
         button.Label.text = label;
-        float width = button.Label.GetPreferredValues(label, 4000f, 40f).x + (button.Icon != null ? 52f : 28f);
+        bool icon = button.Icon != null && button.Icon.gameObject.activeSelf;
+        float width = button.Label.GetPreferredValues(label, 4000f, 40f).x + (icon ? 52f : 28f);
         button.GetComponent<LayoutElement>().preferredWidth = Mathf.Ceil(width);
         button.GetComponent<LayoutElement>().minWidth = Mathf.Min(Mathf.Ceil(width), 88f);
+    }
+
+    // Take out / Explode and Inspect share a row: when their labels do not fit with the icons (a narrow card, long
+    // Uzbek labels), the icons go and the labels stay whole.
+    private void FitPrimaryActions(bool open, bool inspect)
+    {
+        float cardWidth = xrLayout ? PlateWidth - Margin * 2f - 440f - Gap : Small ? CompactCardWidth : CardWidth;
+        float room = cardWidth - cardLayout.padding.horizontal;
+        bool icons = true;
+        for (int pass = 0; pass < 2; pass++)
+        {
+            SetActionIcon(cardOpen, icons);
+            SetActionIcon(cardInspect, icons);
+            if (open) SetActionLabel(cardOpen, cardOpen.Label.text);
+            if (inspect) SetActionLabel(cardInspect, cardInspect.Label.text);
+            float needed = (open ? cardOpen.GetComponent<LayoutElement>().preferredWidth : 0f) +
+                           (inspect ? cardInspect.GetComponent<LayoutElement>().preferredWidth : 0f) +
+                           (open && inspect ? 8f : 0f);
+            if (needed <= room || !icons) break;
+            icons = false;
+        }
+    }
+
+    private static void SetActionIcon(CarExplorerHudButton button, bool show)
+    {
+        if (button.Icon == null || button.Icon.gameObject.activeSelf == show) return;
+        button.Icon.gameObject.SetActive(show);
+        if (show) CarExplorerHudStyle.Stretch(button.Label.rectTransform, 38f, 14f);
+        else CarExplorerHudStyle.Stretch(button.Label.rectTransform, 12f, 12f);
     }
 
     // "System · parent" under the card title.
@@ -962,13 +1220,18 @@ public sealed class CarExplorerHud : MonoBehaviour
     }
 
     // XR controllers; on the desktop the inspect camera's controls while it orbits a node, the walking keys away
-    // from the car, and near it the explorer's keys (F inspect while something is selected).
+    // from the car, I to show the panels while they are hidden, and near the car the explorer's keys (F inspect
+    // while something is selected). A small window gets the short sets.
     private HudKey[] DesiredHintSet()
     {
         if (model.IsXr) return CarExplorerHudText.HintXr;
         if (InspectTarget() != null) return CarExplorerHudText.HintInspect;
-        if (!near) return CarExplorerHudText.HintFar;
-        return model.Selected != null ? CarExplorerHudText.HintNearSelected : CarExplorerHudText.HintNear;
+        bool small = Small;
+        if (!near) return small ? CarExplorerHudText.HintFarCompact : CarExplorerHudText.HintFar;
+        if (panelsHidden) return small ? CarExplorerHudText.HintHiddenCompact : CarExplorerHudText.HintHidden;
+        if (model.Selected != null)
+            return small ? CarExplorerHudText.HintNearSelectedCompact : CarExplorerHudText.HintNearSelected;
+        return small ? CarExplorerHudText.HintNearCompact : CarExplorerHudText.HintNear;
     }
 
     private void RebuildHint()
@@ -1245,6 +1508,28 @@ public sealed class CarExplorerHud : MonoBehaviour
 
     public void OnTreeSizeChanged() => layoutDirty = true;
 
+    // The compact layout applies to the desktop only; the XR plate keeps its size.
+    private bool Small => compact && !xrLayout;
+
+    private void ApplyCompact()
+    {
+        bool small = Small;
+        cardLayout.padding = small ? new RectOffset(18, 18, 14, 16) : new RectOffset(24, 24, 20, 24);
+        cardLayout.spacing = small ? 6f : 8f;
+        cardTitle.fontSize = small ? 24f : CarExplorerHudStyle.TitleSize;
+        float control = small ? CompactControlHeight : ControlHeight;
+        foreach (CarExplorerHudButton button in new[] { cardOpen, cardInspect, cardCollapse, cardPutBack, cardReset })
+            button.GetComponent<LayoutElement>().preferredHeight = control;
+        tree.SetNarrow(small);
+        if (stateValid)
+        {
+            RebuildHint();
+            RebuildCard(false);
+        }
+        ApplyTreeRule();
+        layoutDirty = true;
+    }
+
     // ------------------------------------------------------------------ per frame
 
     private void Update()
@@ -1255,11 +1540,22 @@ public sealed class CarExplorerHud : MonoBehaviour
         if (dirty) Refresh();
 
         Keyboard keyboard = Keyboard.current;
-        if (!xr && keyboard != null && keyboard.hKey.wasPressedThisFrame) SetHelp(!helpOpen);
+        if (!xr && keyboard != null)
+        {
+            if (keyboard.hKey.wasPressedThisFrame) SetHelp(!helpOpen);
+            if (keyboard.iKey.wasPressedThisFrame) SetPanelsHidden(!panelsHidden);
+            if (keyboard.pKey.wasPressedThisFrame) ToggleTree();
+        }
 
         UpdatePresence(xr);
         if (!xr)
         {
+            bool small = scaler != null && scaler.Compact;
+            if (small != compact)
+            {
+                compact = small;
+                ApplyCompact();
+            }
             bool locked = Cursor.lockState == CursorLockMode.Locked;
             if (locked != cursorLocked)
             {
@@ -1309,6 +1605,7 @@ public sealed class CarExplorerHud : MonoBehaviour
         {
             tree.RefreshAll();
             RebuildViewSwitch();
+            RebuildTreeTab();
             RebuildHint();
             RebuildHelp();
         }
@@ -1321,6 +1618,7 @@ public sealed class CarExplorerHud : MonoBehaviour
         if (viewChanged || languageChanged) UpdateSwitchStates();
         if (greetingChanged || languageChanged) UpdateToast();
         if (selectionChanged && model.Selected != null) pendingReveal = model.Selected;
+        if (pathChanged) ApplyTreeRule();
         if (hintSet != DesiredHintSet()) RebuildHint();
 
         stateValid = true;
@@ -1366,12 +1664,16 @@ public sealed class CarExplorerHud : MonoBehaviour
         if (xr)
         {
             Show(workspaceFader, true);
+            Show(panelsButtonFader, false);
             if (near && !wasNear) platePlaced = false;
             Show(plateFader, near);
         }
         else
         {
-            Show(workspaceFader, near);
+            bool shown = near && !panelsHidden;
+            if (Mathf.Approximately(workspaceFader.Target, 0f) == shown) layoutDirty = true;
+            Show(workspaceFader, shown);
+            Show(panelsButtonFader, near);
         }
         if (near != wasNear && !xr)
         {
@@ -1431,6 +1733,9 @@ public sealed class CarExplorerHud : MonoBehaviour
             toastPanel.SetParent(worldCanvas.transform, false);
             helpRoot.SetParent(plate, false);
             platePlaced = false;
+            // The plate has room: its tree keeps its own header and starts open, as before.
+            tree.SetHeaderShown(true);
+            tree.SetCollapsed(false);
         }
         else
         {
@@ -1438,78 +1743,100 @@ public sealed class CarExplorerHud : MonoBehaviour
             hintPanel.SetParent(screenRoot, false);
             toastPanel.SetParent(screenRoot, false);
             helpRoot.SetParent(screenRoot, false);
+            tree.SetHeaderShown(false);
         }
         CarExplorerHudStyle.Stretch(workspace);
         CarExplorerHudStyle.Stretch(helpRoot);
         hintPanel.SetAsLastSibling();
+        panelsButtonPanel.SetAsLastSibling();
         toastPanel.SetAsLastSibling();
         helpRoot.SetAsLastSibling();
-        if (stateValid)
-        {
-            RebuildHint();
-            RebuildHelp();
-        }
+        ApplyPanelsButton();
+        ApplyCompact();
+        if (stateValid) RebuildHelp();
         layoutDirty = true;
     }
+
+    private float CurrentMargin => Small ? CompactMargin : Margin;
+    private float CurrentGap => Small ? CompactGap : Gap;
 
     private void Relayout()
     {
         layoutDirty = false;
         bool xr = xrLayout;
+        bool small = Small;
         float width = xr ? PlateWidth : screenRoot.rect.width;
         float height = xr ? PlateHeight : screenRoot.rect.height;
-        float margin = Margin;
+        float margin = CurrentMargin;
+        float gap = CurrentGap;
 
-        // Top bar: breadcrumb left, view switch centred (on the plate, next to the language), language right.
-        SetTopLeft(breadcrumbPanel, margin, margin);
+        // Top bar: the STRUCTURE tab (desktop) and the breadcrumb left, the view switch centred (beside the language
+        // in a small window and on the plate), the language and help right.
         languagePanel.anchorMin = languagePanel.anchorMax = languagePanel.pivot = new Vector2(1f, 1f);
         languagePanel.anchoredPosition = new Vector2(-margin, -margin);
-        if (xr)
+        if (xr || small)
         {
             viewPanel.anchorMin = viewPanel.anchorMax = viewPanel.pivot = new Vector2(1f, 1f);
-            viewPanel.anchoredPosition = new Vector2(-margin - languagePanel.sizeDelta.x - Gap, -margin);
+            viewPanel.anchoredPosition = new Vector2(-margin - languagePanel.sizeDelta.x - gap, -margin);
         }
         else
         {
             viewPanel.anchorMin = viewPanel.anchorMax = viewPanel.pivot = new Vector2(0.5f, 1f);
             viewPanel.anchoredPosition = new Vector2(0f, -margin);
         }
+        if (treeTabPanel.gameObject.activeSelf == xr) treeTabPanel.gameObject.SetActive(!xr);
+        float crumbLeft = margin;
+        if (!xr)
+        {
+            SetTopLeft(treeTabPanel, margin, margin);
+            crumbLeft += treeTabPanel.sizeDelta.x + gap;
+        }
+        SetTopLeft(breadcrumbPanel, crumbLeft, margin);
         if (stateValid) LayoutBreadcrumb();
 
-        // Hint at the bottom, scaled down if a narrow screen cannot hold it.
-        LayoutRebuilder.ForceRebuildLayoutImmediate(hintRow);
-        float hintWidth = hintRow.rect.width + 32f;
-        hintPanel.anchorMin = hintPanel.anchorMax = hintPanel.pivot = new Vector2(0.5f, 0f);
-        hintPanel.sizeDelta = new Vector2(hintWidth, HintHeight);
-        hintPanel.anchoredPosition = new Vector2(0f, xr ? 20f : margin);
-        float hintScale = Mathf.Min(1f, (width - margin * 2f) / hintWidth);
-        hintPanel.localScale = new Vector3(hintScale, hintScale, 1f);
+        float bottomY = xr ? 20f : margin;
+        LayoutBottomRow(width, margin, gap, bottomY);
 
-        float top = margin + BarHeight + Gap;
-        float bottom = (xr ? 20f : margin) + HintHeight + Gap;
+        float top = margin + BarHeight + gap;
+        float bottom = bottomY + HintHeight + gap;
         float available = Mathf.Max(160f, height - top - bottom);
 
-        // On a wide screen the tree takes a little more room for long names; in small windows it keeps the minimum.
-        float treeWidth = xr ? 440f : Mathf.Clamp(Mathf.Round(width * TreeWidthShare / 8f) * 8f, TreeMinWidth,
-            TreeMaxWidth);
-        float treeHeight = xr && !tree.Collapsed ? available : Mathf.Min(available, tree.PreferredHeight);
+        // The tree: the whole height on the plate; on the desktop at most TreeRows rows, and only while open.
+        float treeWidth, treeHeight;
+        if (xr)
+        {
+            treeWidth = 440f;
+            treeHeight = !tree.Collapsed ? available : Mathf.Min(available, tree.PreferredHeight);
+            if (!tree.Panel.gameObject.activeSelf) tree.Panel.gameObject.SetActive(true);
+        }
+        else
+        {
+            treeWidth = small ? CompactTreeWidth
+                : Mathf.Clamp(Mathf.Round(width * TreeWidthShare / 8f) * 8f, TreeMinWidth, TreeMaxWidth);
+            float most = tree.HeightForRows(small ? CompactTreeRows : TreeRows);
+            treeHeight = Mathf.Min(available, Mathf.Min(most, tree.PreferredHeight));
+            if (tree.Panel.gameObject.activeSelf == tree.Collapsed) tree.Panel.gameObject.SetActive(!tree.Collapsed);
+        }
         SetTopLeft(tree.Panel, margin, top);
         tree.Panel.sizeDelta = new Vector2(treeWidth, treeHeight);
         tree.SetWidth(treeWidth);
-        float rowsHeight = treeHeight - CarExplorerHudTree.HeaderHeight - 4f - CarExplorerHudTree.BottomPadding;
+        float rowsHeight = treeHeight - tree.TopInset - CarExplorerHudTree.BottomPadding;
         if (!tree.Collapsed) tree.SetViewportHeight(rowsHeight);
 
-        float cardWidth = xr ? width - margin * 2f - treeWidth - Gap : CardWidth;
+        float cardWidth = xr ? width - margin * 2f - treeWidth - Gap : small ? CompactCardWidth : CardWidth;
         cardPanel.anchorMin = cardPanel.anchorMax = cardPanel.pivot = new Vector2(1f, 1f);
         cardPanel.anchoredPosition = new Vector2(-margin, -top);
         cardPanel.sizeDelta = new Vector2(cardWidth, cardPanel.sizeDelta.y);
-        FitCard(available);
+        FitCard(available, cardWidth - cardLayout.padding.horizontal);
 
-        // Remy's toast: top centre below the view switch on the desktop, above the plate in XR.
+        // Remy's toast: top centre below the top bar on the desktop (at the top while the panels are hidden), above
+        // the plate in XR.
+        float toastWidth = xr ? ToastWidth : Mathf.Min(small ? CompactToastWidth : ToastWidth, width - margin * 2f);
         toastPanel.anchorMin = toastPanel.anchorMax = new Vector2(0.5f, 1f);
         toastPanel.pivot = new Vector2(0.5f, xr ? 0f : 1f);
-        toastPanel.anchoredPosition = new Vector2(0f, xr ? 16f : -top);
-        toastPanel.sizeDelta = new Vector2(ToastWidth, toastPanel.sizeDelta.y);
+        bool panels = workspaceFader.Target > 0f;
+        toastPanel.anchoredPosition = new Vector2(0f, xr ? 16f : -(panels ? top : margin));
+        toastPanel.sizeDelta = new Vector2(toastWidth, toastPanel.sizeDelta.y);
         LayoutRebuilder.ForceRebuildLayoutImmediate(toastPanel);
 
         helpPanel.sizeDelta = new Vector2(Mathf.Min(HelpWidth, width - margin * 2f), helpPanel.sizeDelta.y);
@@ -1525,37 +1852,65 @@ public sealed class CarExplorerHud : MonoBehaviour
         PublishSafeViewport();
     }
 
+    // The bottom row: the hint centred on the screen when it has the room, else centred between the explore chip
+    // (left, desktop) and the eye button (right, desktop), and scaled down if even that is too narrow.
+    private void LayoutBottomRow(float width, float margin, float gap, float y)
+    {
+        LayoutRebuilder.ForceRebuildLayoutImmediate(hintRow);
+        float hintWidth = hintRow.rect.width + 32f;
+        hintPanel.anchorMin = hintPanel.anchorMax = hintPanel.pivot = new Vector2(0.5f, 0f);
+        hintPanel.sizeDelta = new Vector2(hintWidth, HintHeight);
+        float left = margin, right = width - margin;
+        if (!xrLayout)
+        {
+            if (chipPanel.gameObject.activeSelf)
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(chipPanel);
+                chipPanel.anchorMin = chipPanel.anchorMax = chipPanel.pivot = Vector2.zero;
+                chipPanel.anchoredPosition = new Vector2(margin, y);
+                if (workspaceFader.Target > 0f) left = margin + chipPanel.rect.width + gap;
+            }
+            panelsButtonPanel.anchorMin = panelsButtonPanel.anchorMax = panelsButtonPanel.pivot = new Vector2(1f, 0f);
+            panelsButtonPanel.anchoredPosition = new Vector2(-margin, y);
+            if (panelsButtonFader.Target > 0f) right = width - margin - panelsButtonPanel.sizeDelta.x - gap;
+        }
+        float scale = Mathf.Min(1f, Mathf.Max(1f, right - left) / hintWidth);
+        float half = hintWidth * scale * 0.5f;
+        float centre = width * 0.5f;
+        if (centre - half < left - 0.5f || centre + half > right + 0.5f) centre = (left + right) * 0.5f;
+        hintPanel.anchoredPosition = new Vector2(centre - width * 0.5f, y);
+        hintPanel.localScale = new Vector3(scale, scale, 1f);
+    }
+
     /// <summary>
-    /// Publishes CarExplorerModels.HudSafeViewport: on the desktop, the band between the tree and the card, under the
-    /// top bar (and Remy's greeting toast while it shows) and above the key hint (a collapsed tree frees the left side
-    /// and keeps only its header line), with a
-    /// gap to every panel; the whole view in XR, without a model and while the panels are hidden away from the car.
+    /// Publishes CarExplorerModels.HudSafeViewport: on the desktop near the car, the view below the top bar, above the
+    /// bottom row (hint, chip, eye button), left of the card's column, right of the tree's while it is open, and below
+    /// Remy's toast while it shows, with a gap to every panel; with the panels hidden (I) everything above the bottom
+    /// row. The explorer's commands select what they move, so the card's column is kept clear before anything is
+    /// selected too: what the explorer places then is not covered when the card appears. The whole view in XR,
+    /// without a model and while the panels are hidden away from the car, except that Remy's toast is kept
+    /// clear while it shows.
     /// </summary>
     private void PublishSafeViewport()
     {
         Rect safe = new Rect(0f, 0f, 1f, 1f);
         float width = screenRoot != null ? screenRoot.rect.width : 0f;
         float height = screenRoot != null ? screenRoot.rect.height : 0f;
-        bool workspace = workspaceFader.Target > 0f;
         bool toast = toastFader.Target > 0f && toastPanel.parent == screenRoot;
-        if (model != null && !xrLayout && (workspace || toast) && screenCanvas.gameObject.activeSelf &&
-            width > 1f && height > 1f)
+        if (model != null && !xrLayout && (near || toast) && screenCanvas.gameObject.activeSelf && width > 1f &&
+            height > 1f)
         {
-            float top = workspace ? Margin + BarHeight + Gap : 0f;
-            float left = 0f;
-            float right = width;
-            float bottom = 0f;
-            if (workspace)
-            {
-                if (tree.Collapsed) top += CarExplorerHudTree.HeaderHeight + Gap;
-                else left = Margin + tree.Panel.sizeDelta.x + Gap;
-                if (cardPanel.gameObject.activeSelf) right = width - Margin - cardPanel.sizeDelta.x - Gap;
-                bottom = Margin + HintHeight * hintPanel.localScale.y + Gap;
-            }
+            float margin = CurrentMargin, gap = CurrentGap;
+            bool panels = near && workspaceFader.Target > 0f;
+            float top = panels ? margin + BarHeight + gap : 0f;
+            float left = 0f, right = width;
+            if (panels && !tree.Collapsed) left = margin + tree.Panel.sizeDelta.x + gap;
+            if (panels) right = width - margin - cardPanel.sizeDelta.x - gap;
+            float bottom = near ? margin + HintHeight + gap : 0f;
             // Remy's greeting toast hangs under the top bar in the middle of the view: while it shows, the band
             // starts below it (also while the panels are hidden away from the car).
             if (toast)
-                top = Mathf.Max(top, -toastPanel.anchoredPosition.y + toastPanel.rect.height + Gap);
+                top = Mathf.Max(top, -toastPanel.anchoredPosition.y + toastPanel.rect.height + gap);
             // A window too small for a free band still gets one, centred where the band would be.
             float minWidth = width * 0.2f, minHeight = height * 0.3f;
             if (right - left < minWidth)
@@ -1577,15 +1932,48 @@ public sealed class CarExplorerHud : MonoBehaviour
         if (CarExplorerModels.HudSafeViewport != safe) CarExplorerModels.HudSafeViewport = safe;
     }
 
-    // The card grows with its text; a description too long for the screen is cut to fit with an ellipsis.
-    private void FitCard(float available)
+    private static readonly string ClampLines = BuildClampLines();
+
+    private static string BuildClampLines()
+    {
+        var lines = new System.Text.StringBuilder("X");
+        for (int i = 1; i < DescriptionLines; i++) lines.Append("\nX");
+        return lines.ToString();
+    }
+
+    // The card grows with its text. On the desktop a description longer than three lines is cut there with an
+    // ellipsis until "More" is pressed; any description too long for the screen is cut to fit.
+    private void FitCard(float available, float innerWidth)
     {
         if (!cardPanel.gameObject.activeSelf) return;
         cardDescriptionLayout.preferredHeight = -1f;
         cardDescription.overflowMode = TextOverflowModes.Overflow;
+        bool hasText = cardDescription.gameObject.activeSelf;
+        bool longText = false;
+        float clampHeight = 0f;
+        if (hasText && !xrLayout && innerWidth > 1f)
+        {
+            descriptionProbe.fontSize = cardDescription.fontSize;
+            float full = descriptionProbe.GetPreferredValues(cardDescription.text, innerWidth, 10000f).y;
+            clampHeight = Mathf.Ceil(descriptionProbe.GetPreferredValues(ClampLines, innerWidth, 10000f).y);
+            longText = full > clampHeight + 2f;
+        }
+        GameObject moreRow = cardMore.transform.parent.gameObject;
+        if (moreRow.activeSelf != longText) moreRow.SetActive(longText);
+        if (longText)
+        {
+            string label = (descriptionExpanded ? CarExplorerHudText.Less : CarExplorerHudText.More).Get(Uzbek);
+            if (cardMore.Label.text != label) cardMore.Label.text = label;
+            CarExplorerHudStyle.Layout(cardMore, cardMore.PreferredWidth(56f) - 16f, 26f);
+            if (!descriptionExpanded)
+            {
+                cardDescriptionLayout.preferredHeight = clampHeight;
+                cardDescription.overflowMode = TextOverflowModes.Ellipsis;
+            }
+        }
         LayoutRebuilder.ForceRebuildLayoutImmediate(cardPanel);
         float excess = cardPanel.rect.height - available;
-        if (excess <= 0f || !cardDescription.gameObject.activeSelf) return;
+        if (excess <= 0f || !hasText) return;
         float lineHeight = CarExplorerHudStyle.BodySize * 1.5f;
         float fitted = cardDescription.rectTransform.rect.height - excess;
         cardDescriptionLayout.preferredHeight = Mathf.Max(lineHeight * 2f, fitted);

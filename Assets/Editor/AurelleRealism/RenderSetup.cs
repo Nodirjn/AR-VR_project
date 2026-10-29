@@ -7,6 +7,10 @@
 //     has no PostProcessData, so post-processing and SSAO can never run there, whatever a camera asks for.
 // Scene: baked indirect GI for the showroom only (exterior stays realtime), baked reflection probes, light probes,
 //     re-tuned showroom lights. Everything is found by name at run time and the tool is idempotent.
+// Hero studio (Showroom Lighting/Aurelle Hero Studio): a flush ceiling frame of diffuse light boxes over the hero car
+//     (long highlight lines on the paint, captured by the bake and the 512 px hero probe), the generated contact
+//     shadow under the car (AurelleHeroContactShadow, every quality level) and the podium's planar reflection
+//     (AurellePlanarReflection, Ultra on the desktop only, drawn through the SSAO-free AurelleMirrorRenderer).
 //
 // Entry points
 //   Menu  Aurelle/Realism/Rendering/Apply Render Setup and Bake Lighting   (normal use)
@@ -23,6 +27,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using UnityEditor;
+using UnityEditor.Rendering.Universal.ShaderGUI;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -46,6 +51,11 @@ public static class AurelleRenderSetup
     const string MaterialFolder = "Assets/Materials/Realism/Rendering";
     const string LensMaterialPath = MaterialFolder + "/AurelleDownlightLens.mat";
     const string OccluderMaterialPath = MaterialFolder + "/AurelleBakeOccluder.mat";
+    const string SoftboxMaterialPath = MaterialFolder + "/AurelleStudioSoftbox.mat";
+    const string SoftboxHousingMaterialPath = MaterialFolder + "/AurelleStudioSoftboxHousing.mat";
+    const string ContactShadowTexturePath = MaterialFolder + "/AurelleHeroContactShadow.png";
+    const string ContactShadowMaterialPath = MaterialFolder + "/AurelleHeroContactShadow.mat";
+    const string MirrorRendererPath = RenderingFolder + "/AurelleMirrorRenderer.asset";
     const int PcQualityLevel = 5;
     const string Tag = "[AurelleRender] ";
 
@@ -65,6 +75,8 @@ public static class AurelleRenderSetup
     const string PremiumProbePrefix = "Premium Car Reflection Probe - ";
     const string ShowroomProbeGroupName = "Light Probe Group";
     const string ExteriorProbeGroupName = "Exterior Light Probe Grid";
+    const string HeroStudioName = "Aurelle Hero Studio";
+    const string PodiumDeckPath = EnvironmentRootName + "/Circular Display/Inset Display Surface";
 
     // ------------------------------------------------------------------ tuning
 
@@ -76,8 +88,26 @@ public static class AurelleRenderSetup
     const float DownlightShadowRadius = 0.3f;
     const float CarDownlightIntensity = 60f, CarDownlightOuter = 72f, CarDownlightInner = 34f;
     const float WasherIntensity = 110f, WasherKelvin = 4300f, WasherOuter = 90f, WasherInner = 50f, WasherRange = 10f, WasherSetback = 2.2f;
-    const float KeyIntensity = 75f, KeyKelvin = 5000f, KeyOuter = 56f, KeyInner = 30f, KeyRange = 11f; // range keeps the premium cars out of its shadow map
-    const float RimIntensity = 34f, RimKelvin = 6500f, RimOuter = 62f, RimInner = 36f, RimRange = 13f;
+    // Studio look: the softbox canopy carries the top light (bake, probes, paint reflections); the key is a softer
+    // front-quarter modelling light with a softer (1024 tier) shadow, the rim a cool edge from behind. Lower than the
+    // first pass so that clear-coat and polished-stone highlights stay out of the clipped range.
+    const float KeyIntensity = 58f, KeyKelvin = 5000f, KeyOuter = 64f, KeyInner = 22f, KeyRange = 11f; // range keeps the premium cars out of its shadow map
+    const float KeyShadowStrength = 0.8f;
+    const float RimIntensity = 28f, RimKelvin = 6500f, RimOuter = 62f, RimInner = 30f, RimRange = 13f;
+    // Softbox canopy: two long strips along the car and two short cross strips, flush under the ceiling, centred on
+    // the hero car and kept inside the inner LED ring's suspension rods. Baked emissive (lights the bake), captured
+    // by the probes, excluded from nothing.
+    const float CanopyHalfWidth = 1.05f, CanopyHalfLength = 2.4f, CanopyStrip = 0.4f, CanopyDepth = 0.08f, CanopyLip = 0.025f;
+    const float CanopyEmission = 7.5f, CanopyKelvin = 5200f;
+    // Hero probe: 512 px on PC (twice the hall probes; the softbox lines stay crisp on the paint), 256 px on Android.
+    // Not 1024: Forward+ copies every visible probe into an octahedral atlas at four times its face size, so a 1024 px
+    // probe takes a 4096 px region and grows the atlas to 8192 px (256 MB at B10G11R11), and its first upload showed
+    // a one-frame garbage reflection on the glazing in the studio lab.
+    const int HeroProbeResolution = 512, HeroProbeAndroidMax = 256;
+    const float HeroProbeBlend = 0.6f;
+    // Planar reflection: layer the car moves to at run time (named by this tool), lowest quality level that draws it.
+    const int MirrorLayer = 30;
+    const string MirrorLayerName = "Aurelle Planar Mirror";
     // Sky light: the builder's 0.62 / 0.55 made shaded facades read black once the fake fill light went away.
     const float AmbientIntensity = 1.0f, SkyReflectionIntensity = 0.8f;
     const float StreetLampIntensity = 12f;
@@ -288,6 +318,7 @@ public static class AurelleRenderSetup
         ApplyReflectionProbes(scene, lighting, hall);
         ApplyLightProbes(scene, lighting, hall, dynamicBounds);
         ApplyPostVolume(scene, lighting);
+        ApplyHeroStudio(scene, lighting);
         ApplyCameras(scene);
         ApplyLightingSettings();
         EditorSceneManager.MarkSceneDirty(scene);
@@ -426,18 +457,26 @@ public static class AurelleRenderSetup
                 Bounds b = r.bounds;
                 if (b.max.y > hall.ceilY - 1.5f && b.min.y > hall.floorY + 1.6f && b.size.y < 3f) fixtures.Add(b);
             }
-        int skippedForFixtures = 0;
+        int skippedForFixtures = 0, skippedForCanopy = 0;
+        Bounds heroForCanopy;
+        bool haveCanopy = TryHeroBounds(scene, out heroForCanopy);
+        Rect canopy = haveCanopy ? CanopyRect(heroForCanopy) : new Rect();
         foreach (float z in rows)
             foreach (float x in columns)
             {
                 if (cars.Any(c => Mathf.Abs(c.Value.center.x - x) < 2.2f && Mathf.Abs(c.Value.center.z - z) < 3f)) continue;
+                // The studio canopy is the hero car's top light; a downlight there would sit inside its housing.
+                if (haveCanopy && x > canopy.xMin - 0.4f && x < canopy.xMax + 0.4f && z > canopy.yMin - 0.4f && z < canopy.yMax + 0.4f) { skippedForCanopy++; continue; }
                 if (fixtures.Any(b => x > b.min.x - 0.6f && x < b.max.x + 0.6f && z > b.min.z - 0.6f && z < b.max.z + 0.6f)) { skippedForFixtures++; continue; }
                 string name = "Downlight " + F(x) + " " + F(z);
                 AddDownlight(grid, name, new Vector3(x, lightY, z), DownlightIntensity, DownlightOuter, DownlightInner, lens, hall);
                 wanted.Add(name); added++;
             }
         foreach (Transform c in grid.Cast<Transform>().ToList()) if (!wanted.Contains(c.name)) Object.DestroyImmediate(c.gameObject);
-        Note("downlights: " + recessed.Count + " recessed + " + added + " added (" + rows.Count + " rows x " + columns.Count + " columns, one over each display car, reception, presenter post; " + skippedForFixtures + " skipped under interior ceiling fixtures), all baked, " + DownlightKelvin + "K, I=" + F(DownlightIntensity) + "/" + F(CarDownlightIntensity));
+        Note("downlights: " + recessed.Count + " recessed + " + added + " added (" + rows.Count + " rows x " + columns.Count + " columns, one over each display car, reception, presenter post; " + skippedForFixtures + " skipped under interior ceiling fixtures, " + skippedForCanopy + " under the hero canopy), all baked, " + DownlightKelvin + "K, I=" + F(DownlightIntensity) + "/" + F(CarDownlightIntensity));
+        if (haveCanopy)
+            foreach (Light l in recessed)
+                if (canopy.Contains(new Vector2(l.transform.position.x, l.transform.position.z))) Warn("recessed downlight '" + l.name + "' lies under the hero canopy");
 
         // Wall washers: just below the ceiling, set back from the feature wall, aimed at its middle. One is centred on
         // each wall display; the rest fill the gaps. Existing 'Rear Wall Wash Spotlight N' lights are reused.
@@ -474,8 +513,8 @@ public static class AurelleRenderSetup
         if (key != null)
         {
             Vector3 p = new Vector3(heroCenter.x + 4.2f, lightY, heroCenter.z + 4.3f);
-            ConfigureSpot(key, p, heroCenter + Vector3.up * 0.1f, LightmapBakeType.Mixed, KeyIntensity, KeyKelvin, KeyOuter, KeyInner, KeyRange, LightShadows.Soft, 0.9f, 0.1f);
-            SetShadowTier(key, 2);
+            ConfigureSpot(key, p, heroCenter + Vector3.up * 0.1f, LightmapBakeType.Mixed, KeyIntensity, KeyKelvin, KeyOuter, KeyInner, KeyRange, LightShadows.Soft, KeyShadowStrength, 0.1f);
+            SetShadowTier(key, 1);   // medium tier: a softer real-time penumbra under the car
         }
         Light rim = ChildLight(lighting, "Showroom Rim Spot");
         if (rim != null)
@@ -484,7 +523,8 @@ public static class AurelleRenderSetup
             // No real-time shadow: a rim light's shadow is hardly visible and costs a second pass over the hero car.
             ConfigureSpot(rim, p, heroCenter + new Vector3(0f, 0.35f, 0.4f), LightmapBakeType.Mixed, RimIntensity, RimKelvin, RimOuter, RimInner, RimRange, LightShadows.None, 0.8f, 0.1f);
         }
-        Note("hero key/rim: mixed, I=" + F(KeyIntensity) + "/" + F(RimIntensity) + ", key casts real-time soft shadows (PC only)");
+        Note("hero key/rim: mixed, I=" + F(KeyIntensity) + "/" + F(RimIntensity) + ", key casts real-time soft shadows (PC only, medium tier, strength " + F(KeyShadowStrength) + ")");
+        if (haveHero) BuildHeroCanopy(lighting, hall, hero);
 
         // Street lamps stay real time and out of the bake.
         int lamps = 0;
@@ -912,6 +952,8 @@ public static class AurelleRenderSetup
         // Hero car: captured from the car's centre (the car itself is dynamic and not captured), direction-only
         // lookup, which is the accurate choice for a convex object in the middle of a large room. The influence box
         // starts above the floor so floor pixels keep the box-projected main probe (Forward+ evaluates per pixel).
+        // 512 px keeps the studio canopy's strips crisp in the clear coat; the box blends into the hall probe over
+        // 0.6 m so the car's lower body, wheels and exploded parts do not show a seam.
         Bounds hero;
         int count = 1;
         if (TryHeroBounds(scene, out hero))
@@ -919,7 +961,7 @@ public static class AurelleRenderSetup
             ReflectionProbe hp = ChildComponent<ReflectionProbe>(lighting, HeroProbeName);
             Bounds box = new Bounds();
             box.SetMinMax(new Vector3(hero.min.x - 0.7f, hall.floorY + 0.14f, hero.min.z - 0.7f), new Vector3(hero.max.x + 0.7f, hero.max.y + 0.8f, hero.max.z + 0.7f));
-            ConfigureProbe(hp, new Vector3(hero.center.x, hall.floorY + 0.8f, hero.center.z), box, false, 3, 256, 0.4f);
+            ConfigureProbe(hp, new Vector3(hero.center.x, hall.floorY + 0.8f, hero.center.z), box, false, 3, HeroProbeResolution, HeroProbeBlend);
             count++;
         }
 
@@ -943,7 +985,7 @@ public static class AurelleRenderSetup
         }
         foreach (Transform c in lighting.Cast<Transform>().ToList())
             if (c.name.StartsWith(PremiumProbePrefix, StringComparison.Ordinal) && !wanted.Contains(c.name)) Object.DestroyImmediate(c.gameObject);
-        Note("reflection probes: " + count + " baked (main box-projected 256, hero + per premium car 256)");
+        Note("reflection probes: " + count + " baked (main box-projected 256, hero " + HeroProbeResolution + " (Android " + HeroProbeAndroidMax + "), per premium car 256)");
     }
 
     static void ConfigureProbe(ReflectionProbe p, Vector3 capture, Bounds box, bool boxProjection, int importance, int resolution, float blend)
@@ -1080,20 +1122,23 @@ public static class AurelleRenderSetup
         tone.mode.Override(TonemappingMode.ACES);
 
         var color = Component<ColorAdjustments>(profile);
-        color.postExposure.Override(0.65f);
-        color.contrast.Override(8f);
-        color.saturation.Override(6f);
+        // Premium and realistic rather than graded: a little less exposure for the canopy's added light, a touch more
+        // contrast, almost no extra saturation; a slightly cooler balance against the warm wall washers; bloom only
+        // on real light sources (threshold above the paint's brightest canopy reflections).
+        color.postExposure.Override(0.55f);
+        color.contrast.Override(10f);
+        color.saturation.Override(2f);
         color.colorFilter.Override(Color.white);
         color.hueShift.Override(0f);
 
         var wb = Component<WhiteBalance>(profile);
-        wb.temperature.Override(-3f);
+        wb.temperature.Override(-5f);
         wb.tint.Override(1f);
 
         var bloom = Component<Bloom>(profile);
-        bloom.threshold.Override(1.1f);
-        bloom.intensity.Override(0.22f);
-        bloom.scatter.Override(0.62f);
+        bloom.threshold.Override(1.3f);
+        bloom.intensity.Override(0.18f);
+        bloom.scatter.Override(0.6f);
         bloom.tint.Override(Color.white);
         bloom.clamp.Override(65472f);
         bloom.highQualityFiltering.Override(true);
@@ -1101,7 +1146,7 @@ public static class AurelleRenderSetup
         var vignette = Component<Vignette>(profile);
         vignette.color.Override(Color.black);
         vignette.center.Override(new Vector2(0.5f, 0.5f));
-        vignette.intensity.Override(0.18f);
+        vignette.intensity.Override(0.16f);
         vignette.smoothness.Override(0.42f);
         vignette.rounded.Override(false);
         EditorUtility.SetDirty(profile);
@@ -1119,7 +1164,7 @@ public static class AurelleRenderSetup
         volume.enabled = true;
         go.SetActive(true);
         EditorUtility.SetDirty(volume);
-        Note("post volume '" + PostVolumeName + "': ACES, exposure +0.65, contrast 8, saturation 6, WB -3/+1, bloom 1.1/0.22, vignette 0.18");
+        Note("post volume '" + PostVolumeName + "': ACES, exposure +0.55, contrast 10, saturation 2, WB -5/+1, bloom 1.3/0.18, vignette 0.16");
     }
 
     static T Component<T>(VolumeProfile profile) where T : VolumeComponent
@@ -1152,6 +1197,391 @@ public static class AurelleRenderSetup
         EditorUtility.SetDirty(data);
         EditorUtility.SetDirty(cam);
         Note("desktop camera: post on, SMAA high, dithering");
+    }
+
+    // ------------------------------------------------------------------ hero studio
+
+    // Plan rectangle (x, z) of the softbox canopy: centred on the hero car at rest.
+    static Rect CanopyRect(Bounds hero)
+    {
+        return new Rect(hero.center.x - CanopyHalfWidth, hero.center.z - CanopyHalfLength, CanopyHalfWidth * 2f, CanopyHalfLength * 2f);
+    }
+
+    // A flush ceiling frame of four light boxes (white powder-coat housing, opal diffuser 12 mm proud of it, inset by
+    // the lip): two long strips over the car's shoulders and two cross strips over its ends. Static for GI and the
+    // reflection probes, lit by light probes itself, no shadows (it is a light source).
+    static void BuildHeroCanopy(Transform lighting, Hall hall, Bounds hero)
+    {
+        Transform studio = ChildTransform(lighting, HeroStudioName);
+        studio.localPosition = Vector3.zero; studio.localRotation = Quaternion.identity; studio.localScale = Vector3.one;
+        Transform canopy = ChildTransform(studio, "Softbox Canopy");
+        canopy.position = Vector3.zero; canopy.rotation = Quaternion.identity; canopy.localScale = Vector3.one;
+        Material housing = EnsureSoftboxHousingMaterial(), diffuser = EnsureSoftboxMaterial();
+        Mesh cube = Resources.GetBuiltinResource<Mesh>("Cube.fbx");
+        Rect r = CanopyRect(hero);
+        float top = hall.ceilY, bottom = hall.ceilY - CanopyDepth;
+        float cross = r.width - 2f * CanopyStrip;
+        var strips = new[]
+        {
+            new KeyValuePair<string, Rect>("Softbox Left", new Rect(r.xMin, r.yMin, CanopyStrip, r.height)),
+            new KeyValuePair<string, Rect>("Softbox Right", new Rect(r.xMax - CanopyStrip, r.yMin, CanopyStrip, r.height)),
+            new KeyValuePair<string, Rect>("Softbox Front", new Rect(r.xMin + CanopyStrip, r.yMax - CanopyStrip, cross, CanopyStrip)),
+            new KeyValuePair<string, Rect>("Softbox Rear", new Rect(r.xMin + CanopyStrip, r.yMin, cross, CanopyStrip)),
+        };
+        var wanted = new HashSet<string>();
+        foreach (var strip in strips)
+        {
+            Rect s = strip.Value;
+            // Cross strips butt against the long ones with a 6 mm shadow gap.
+            if (strip.Key == "Softbox Front" || strip.Key == "Softbox Rear") s = new Rect(s.xMin + 0.006f, s.yMin, s.width - 0.012f, s.height);
+            Vector3 c = new Vector3(s.center.x, (top + bottom + 0.012f) * 0.5f, s.center.y);
+            AddBox(canopy, strip.Key + " Housing", c, new Vector3(s.width, top - bottom - 0.012f, s.height), cube, housing);
+            Vector3 dc = new Vector3(s.center.x, bottom + 0.009f, s.center.y);
+            AddBox(canopy, strip.Key + " Diffuser", dc, new Vector3(s.width - 2f * CanopyLip, 0.018f, s.height - 2f * CanopyLip), cube, diffuser);
+            wanted.Add(strip.Key + " Housing"); wanted.Add(strip.Key + " Diffuser");
+        }
+        foreach (Transform c in canopy.Cast<Transform>().ToList()) if (!wanted.Contains(c.name)) Object.DestroyImmediate(c.gameObject);
+        Note("hero canopy: 4 softboxes " + F(r.width) + " x " + F(r.height) + " m frame, strips " + F(CanopyStrip) + " m, flush at " + F(top) + " m over " + F(r.center.x) + ", " + F(r.center.y) + ", " + F(CanopyKelvin) + "K x" + F(CanopyEmission) + " baked emissive");
+    }
+
+    static void AddBox(Transform parent, string name, Vector3 center, Vector3 size, Mesh cube, Material mat)
+    {
+        Transform t = parent.Find(name);
+        GameObject go = t != null ? t.gameObject : new GameObject(name);
+        if (t == null) go.transform.SetParent(parent, false);
+        go.transform.SetPositionAndRotation(center, Quaternion.identity);
+        go.transform.localScale = size;
+        var mf = go.GetComponent<MeshFilter>();
+        if (mf == null) mf = go.AddComponent<MeshFilter>();
+        mf.sharedMesh = cube;
+        var mr = go.GetComponent<MeshRenderer>();
+        if (mr == null) mr = go.AddComponent<MeshRenderer>();
+        mr.sharedMaterial = mat;
+        mr.shadowCastingMode = ShadowCastingMode.Off;
+        mr.receiveShadows = false;
+        mr.receiveGI = ReceiveGI.LightProbes;
+        mr.lightProbeUsage = LightProbeUsage.BlendProbes;
+        mr.reflectionProbeUsage = ReflectionProbeUsage.BlendProbes;
+        GameObjectUtility.SetStaticEditorFlags(go, GiFlags);
+    }
+
+    static Material EnsureSoftboxMaterial()
+    {
+        Material mat = EnsureLitMaterial(SoftboxMaterialPath, "AurelleStudioSoftbox");
+        mat.SetColor("_BaseColor", new Color(0.96f, 0.96f, 0.95f));
+        mat.SetFloat("_Smoothness", 0.25f);
+        mat.SetFloat("_Metallic", 0f);
+        mat.SetColor("_EmissionColor", Mathf.CorrelatedColorTemperatureToRGB(CanopyKelvin) * CanopyEmission);
+        mat.EnableKeyword("_EMISSION");
+        // Baked emissive: the canopy lights the podium and the probes in the bake (URP 17.3 keeps _EMISSION only
+        // with a Realtime or Baked emissive flag).
+        mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.BakedEmissive;
+        EditorUtility.SetDirty(mat);
+        return mat;
+    }
+
+    static Material EnsureSoftboxHousingMaterial()
+    {
+        Material mat = EnsureLitMaterial(SoftboxHousingMaterialPath, "AurelleStudioSoftboxHousing");
+        mat.SetColor("_BaseColor", new Color(0.86f, 0.86f, 0.85f));   // white powder coat, like the ceiling
+        mat.SetFloat("_Smoothness", 0.35f);
+        mat.SetFloat("_Metallic", 0f);
+        mat.SetColor("_EmissionColor", Color.black);
+        mat.DisableKeyword("_EMISSION");
+        mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.EmissiveIsBlack;
+        EditorUtility.SetDirty(mat);
+        return mat;
+    }
+
+    static Material EnsureLitMaterial(string path, string name)
+    {
+        var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+        Shader lit = Shader.Find("Universal Render Pipeline/Lit");
+        if (mat == null)
+        {
+            mat = new Material(lit) { name = name };
+            AssetDatabase.CreateAsset(mat, path);
+        }
+        if (mat.shader != lit) mat.shader = lit;
+        mat.enableInstancing = true;
+        return mat;
+    }
+
+    // The contact shadow (all quality levels) and the podium's planar reflection (Ultra, desktop) on one object.
+    static void ApplyHeroStudio(Scene scene, Transform lighting)
+    {
+        Transform studio = ChildTransform(lighting, HeroStudioName);
+        GameObject car = Root(scene, HeroCarName);
+        Transform deckT = FindPath(scene, PodiumDeckPath);
+        Renderer deck = deckT != null ? deckT.GetComponent<Renderer>() : null;
+        if (car == null || deck == null) { Warn("hero studio: CarConcept or the podium deck missing"); return; }
+        float deckTop = deck.bounds.max.y;
+
+        // Contact shadow quad: a flat quad 3 mm above the deck with the generated footprint texture.
+        Rect area;
+        Texture2D tex = BuildContactShadowTexture(car, deckTop, out area);
+        Material mat = EnsureContactShadowMaterial(tex);
+        Transform quad = ChildTransform(studio, "Hero Contact Shadow");
+        quad.SetPositionAndRotation(new Vector3(area.center.x, deckTop + 0.003f, area.center.y), Quaternion.Euler(90f, 0f, 0f));
+        quad.localScale = new Vector3(area.width, area.height, 1f);
+        var mf = quad.GetComponent<MeshFilter>();
+        if (mf == null) mf = quad.gameObject.AddComponent<MeshFilter>();
+        mf.sharedMesh = Resources.GetBuiltinResource<Mesh>("Quad.fbx");
+        var mr = quad.GetComponent<MeshRenderer>();
+        if (mr == null) mr = quad.gameObject.AddComponent<MeshRenderer>();
+        mr.sharedMaterial = mat;
+        mr.shadowCastingMode = ShadowCastingMode.Off;
+        mr.receiveShadows = false;
+        mr.lightProbeUsage = LightProbeUsage.Off;
+        mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+        mr.receiveGI = ReceiveGI.LightProbes;
+        GameObjectUtility.SetStaticEditorFlags(quad.gameObject, 0);
+        var shadow = studio.GetComponent<AurelleHeroContactShadow>();
+        if (shadow == null) shadow = studio.gameObject.AddComponent<AurelleHeroContactShadow>();
+        shadow.shadowQuad = mr;
+        EditorUtility.SetDirty(shadow);
+
+        // Planar reflection: the mirror layer, the SSAO-free renderer and the deck plane.
+        EnsureLayerName(MirrorLayer, MirrorLayerName);
+        int rendererIndex = EnsureMirrorRenderer();
+        var planar = studio.GetComponent<AurellePlanarReflection>();
+        if (planar == null) planar = studio.gameObject.AddComponent<AurellePlanarReflection>();
+        planar.deck = deck;
+        planar.planeHeight = deckTop;
+        planar.car = car.transform;
+        planar.mirrorLayer = MirrorLayer;
+        planar.mirrorRendererIndex = rendererIndex;
+        planar.minQualityLevel = PcQualityLevel;
+        EditorUtility.SetDirty(planar);
+        Note("hero studio: contact shadow " + F(area.width) + " x " + F(area.height) + " m at deck " + F(deckTop) + " (" + ContactShadowTexturePath + "), planar reflection at y " + F(deckTop) + " on layer " + MirrorLayer + " through renderer " + rendererIndex + " (Ultra, desktop)");
+    }
+
+    static Material EnsureContactShadowMaterial(Texture2D tex)
+    {
+        Shader unlit = Shader.Find("Universal Render Pipeline/Unlit");
+        var mat = AssetDatabase.LoadAssetAtPath<Material>(ContactShadowMaterialPath);
+        if (mat == null)
+        {
+            mat = new Material(unlit) { name = "AurelleHeroContactShadow" };
+            AssetDatabase.CreateAsset(mat, ContactShadowMaterialPath);
+        }
+        if (mat.shader != unlit) mat.shader = unlit;
+        mat.SetTexture("_BaseMap", tex);
+        mat.SetColor("_BaseColor", new Color(0f, 0f, 0f, 1f));
+        mat.SetFloat("_Surface", 1f);       // transparent
+        mat.SetFloat("_Blend", 0f);         // alpha: black over the deck = multiply by (1 - a)
+        mat.SetFloat("_AlphaClip", 0f);
+        mat.SetFloat("_Cull", 2f);
+        if (mat.HasProperty("_QueueControl")) mat.SetFloat("_QueueControl", 0f);
+        // URP's material validation (on import, in Play Mode) recomputes the queue from the surface type and
+        // _QueueOffset, so the offset carries the "before the car's glass" queue; without it the queue fell back to 3000.
+        if (mat.HasProperty("_QueueOffset")) mat.SetFloat("_QueueOffset", -10f);
+        BaseShaderGUI.SetMaterialKeywords(mat);
+        mat.renderQueue = (int)RenderQueue.Transparent - 10;   // before the car's glass
+        mat.enableInstancing = false;
+        mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.EmissiveIsBlack;
+        EditorUtility.SetDirty(mat);
+        return mat;
+    }
+
+    // Ambient occlusion of the car on the deck, from its geometry: the lowest car surface above every 2 cm cell of the
+    // footprint, then three blurred layers (tyre contact, underbody, the whole footprint) combined as occlusion.
+    // Deterministic, rewritten only when it changes.
+    static Texture2D BuildContactShadowTexture(GameObject car, float deckTop, out Rect area)
+    {
+        Transform v6 = car.transform.Find(V6Name), internals = car.transform.Find("Internals");
+        var filters = new List<MeshFilter>();
+        Bounds b = new Bounds();
+        bool any = false;
+        foreach (MeshFilter mf in car.GetComponentsInChildren<MeshFilter>(false))
+        {
+            var r = mf.GetComponent<MeshRenderer>();
+            if (mf.sharedMesh == null || r == null || !r.enabled) continue;
+            if ((v6 != null && mf.transform.IsChildOf(v6)) || (internals != null && mf.transform.IsChildOf(internals))) continue;
+            filters.Add(mf);
+            if (any) b.Encapsulate(r.bounds); else { b = r.bounds; any = true; }
+        }
+        const float Margin = 0.5f;
+        const int N = 256;
+        area = new Rect(b.min.x - Margin, b.min.z - Margin, b.size.x + 2f * Margin, b.size.z + 2f * Margin);
+        float cw = area.width / N, ch = area.height / N;
+        var height = new float[N * N];
+        for (int i = 0; i < height.Length; i++) height[i] = float.MaxValue;
+        foreach (MeshFilter mf in filters)
+        {
+            Mesh mesh = mf.sharedMesh;
+            Vector3[] v = mesh.vertices;
+            Matrix4x4 m = mf.transform.localToWorldMatrix;
+            for (int i = 0; i < v.Length; i++) v[i] = m.MultiplyPoint3x4(v[i]);
+            for (int sub = 0; sub < mesh.subMeshCount; sub++)
+            {
+                if (mesh.GetTopology(sub) != MeshTopology.Triangles) continue;
+                int[] tris = mesh.GetTriangles(sub);
+                for (int t = 0; t + 2 < tris.Length; t += 3)
+                    RasterizeLowest(v[tris[t]], v[tris[t + 1]], v[tris[t + 2]], area, cw, ch, N, deckTop, height);
+            }
+        }
+        // Layers: contact (< 6 cm), underbody (< 40 cm), footprint (anything); sigma in metres, weight.
+        float[] contact = Layer(height, h => h < 0.06f), under = Layer(height, h => h < 0.4f), all = Layer(height, h => h < float.MaxValue);
+        Blur(contact, N, 0.022f / cw, 0.022f / ch);
+        Blur(under, N, 0.11f / cw, 0.11f / ch);
+        Blur(all, N, 0.32f / cw, 0.32f / ch);
+        var pixels = new Color32[N * N];
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++)
+            {
+                int i = y * N + x;
+                float occ = 1f - (1f - 0.95f * contact[i]) * (1f - 0.62f * under[i]) * (1f - 0.42f * all[i]);
+                // Fade to nothing at the quad's border.
+                float ex = Mathf.Min(x, N - 1 - x) / (N * 0.06f), ey = Mathf.Min(y, N - 1 - y) / (N * 0.06f);
+                occ *= Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(Mathf.Min(ex, ey)));
+                pixels[i] = new Color32(0, 0, 0, (byte)Mathf.RoundToInt(Mathf.Clamp01(occ * 0.92f) * 255f));
+            }
+        var tex = new Texture2D(N, N, TextureFormat.RGBA32, false, true);
+        tex.SetPixels32(pixels);
+        tex.Apply();
+        byte[] png = tex.EncodeToPNG();
+        Object.DestroyImmediate(tex);
+        string full = Path.GetFullPath(ContactShadowTexturePath);
+        bool changed = !File.Exists(full) || !File.ReadAllBytes(full).SequenceEqual(png);
+        if (changed)
+        {
+            File.WriteAllBytes(full, png);
+            AssetDatabase.ImportAsset(ContactShadowTexturePath, ImportAssetOptions.ForceUpdate);
+        }
+        var ti = AssetImporter.GetAtPath(ContactShadowTexturePath) as TextureImporter;
+        if (ti != null)
+        {
+            bool dirty = ti.sRGBTexture || ti.alphaSource != TextureImporterAlphaSource.FromInput || ti.wrapMode != TextureWrapMode.Clamp || !ti.mipmapEnabled || ti.maxTextureSize != 256 || ti.textureCompression != TextureImporterCompression.Uncompressed;
+            if (dirty)
+            {
+                ti.textureType = TextureImporterType.Default;
+                ti.sRGBTexture = false;
+                ti.alphaSource = TextureImporterAlphaSource.FromInput;
+                ti.alphaIsTransparency = false;
+                ti.wrapMode = TextureWrapMode.Clamp;
+                ti.mipmapEnabled = true;
+                ti.maxTextureSize = 256;
+                ti.textureCompression = TextureImporterCompression.Uncompressed;   // 256 KB, smooth gradients
+                ti.SaveAndReimport();
+            }
+        }
+        Note("contact shadow texture: " + filters.Count + " car meshes rasterised into " + N + "x" + N + (changed ? " (rewritten)" : " (unchanged)"));
+        return AssetDatabase.LoadAssetAtPath<Texture2D>(ContactShadowTexturePath);
+    }
+
+    static void RasterizeLowest(Vector3 a, Vector3 b, Vector3 c, Rect area, float cw, float ch, int n, float deckTop, float[] height)
+    {
+        float ax = (a.x - area.xMin) / cw, az = (a.z - area.yMin) / ch;
+        float bx = (b.x - area.xMin) / cw, bz = (b.z - area.yMin) / ch;
+        float cx = (c.x - area.xMin) / cw, cz = (c.z - area.yMin) / ch;
+        int x0 = Mathf.Max(0, Mathf.FloorToInt(Mathf.Min(ax, Mathf.Min(bx, cx)))), x1 = Mathf.Min(n - 1, Mathf.CeilToInt(Mathf.Max(ax, Mathf.Max(bx, cx))));
+        int z0 = Mathf.Max(0, Mathf.FloorToInt(Mathf.Min(az, Mathf.Min(bz, cz)))), z1 = Mathf.Min(n - 1, Mathf.CeilToInt(Mathf.Max(az, Mathf.Max(bz, cz))));
+        float area2 = (bx - ax) * (cz - az) - (cx - ax) * (bz - az);
+        float lowest = Mathf.Min(a.y, Mathf.Min(b.y, c.y)) - deckTop;
+        if (Mathf.Abs(area2) < 1e-6f)
+        {
+            // Vertical (edge-on) triangle: mark the cells along it with its lowest point.
+            for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) if (x1 - x0 <= 1 || z1 - z0 <= 1) Lower(height, z * n + x, lowest);
+            return;
+        }
+        for (int z = z0; z <= z1; z++)
+            for (int x = x0; x <= x1; x++)
+            {
+                float px = x + 0.5f, pz = z + 0.5f;
+                float w0 = ((bx - px) * (cz - pz) - (cx - px) * (bz - pz)) / area2;
+                float w1 = ((cx - px) * (az - pz) - (ax - px) * (cz - pz)) / area2;
+                float w2 = 1f - w0 - w1;
+                if (w0 < -0.02f || w1 < -0.02f || w2 < -0.02f) continue;
+                Lower(height, z * n + x, w0 * a.y + w1 * b.y + w2 * c.y - deckTop);
+            }
+    }
+
+    static void Lower(float[] height, int i, float h)
+    {
+        if (h < height[i]) height[i] = Mathf.Max(0f, h);
+    }
+
+    static float[] Layer(float[] height, Func<float, bool> keep)
+    {
+        var l = new float[height.Length];
+        for (int i = 0; i < height.Length; i++) l[i] = keep(height[i]) ? 1f : 0f;
+        return l;
+    }
+
+    // Separable Gaussian blur with clamped borders; sigma in cells.
+    static void Blur(float[] img, int n, float sigmaX, float sigmaY)
+    {
+        BlurPass(img, n, Mathf.Max(0.5f, sigmaX), true);
+        BlurPass(img, n, Mathf.Max(0.5f, sigmaY), false);
+    }
+
+    static void BlurPass(float[] img, int n, float sigma, bool horizontal)
+    {
+        int radius = Mathf.CeilToInt(sigma * 3f);
+        var kernel = new float[radius * 2 + 1];
+        float sum = 0f;
+        for (int k = -radius; k <= radius; k++) { kernel[k + radius] = Mathf.Exp(-0.5f * k * k / (sigma * sigma)); sum += kernel[k + radius]; }
+        for (int k = 0; k < kernel.Length; k++) kernel[k] /= sum;
+        var src = (float[])img.Clone();
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++)
+            {
+                float acc = 0f;
+                for (int k = -radius; k <= radius; k++)
+                {
+                    int sx = horizontal ? Mathf.Clamp(x + k, 0, n - 1) : x, sy = horizontal ? y : Mathf.Clamp(y + k, 0, n - 1);
+                    acc += src[sy * n + sx] * kernel[k + radius];
+                }
+                img[y * n + x] = acc;
+            }
+    }
+
+    // A renderer for the planar reflection camera only: Forward+ like the PC renderer, but without SSAO and without
+    // post-processing data. Registered as an extra renderer of the PC pipeline asset; returns its index there.
+    static int EnsureMirrorRenderer()
+    {
+        var data = AssetDatabase.LoadAssetAtPath<UniversalRendererData>(MirrorRendererPath);
+        if (data == null)
+        {
+            data = ScriptableObject.CreateInstance<UniversalRendererData>();
+            data.name = "AurelleMirrorRenderer";
+            AssetDatabase.CreateAsset(data, MirrorRendererPath);
+        }
+        var so = new SerializedObject(data);
+        SetProp(so, "m_RenderingMode", (int)RenderingMode.ForwardPlus);
+        SetProp(so, "m_DepthPrimingMode", 0);
+        SetProp(so, "m_IntermediateTextureMode", 0);   // auto: renders straight into the reflection texture
+        so.ApplyModifiedPropertiesWithoutUndo();
+        if (data.postProcessData != null) data.postProcessData = null;
+        if (data.rendererFeatures.Count > 0) Warn("mirror renderer has renderer features; remove them (SSAO would run for the reflection)");
+        EditorUtility.SetDirty(data);
+
+        var pc = AssetDatabase.LoadAssetAtPath<UniversalRenderPipelineAsset>(PcPipelinePath);
+        if (pc == null) return -1;
+        var pso = new SerializedObject(pc);
+        SerializedProperty list = pso.FindProperty("m_RendererDataList");
+        for (int i = 0; i < list.arraySize; i++)
+            if (list.GetArrayElementAtIndex(i).objectReferenceValue == data) return i;
+        list.arraySize++;
+        list.GetArrayElementAtIndex(list.arraySize - 1).objectReferenceValue = data;
+        pso.ApplyModifiedPropertiesWithoutUndo();
+        EditorUtility.SetDirty(pc);
+        return list.arraySize - 1;
+    }
+
+    static void EnsureLayerName(int layer, string name)
+    {
+        Object tm = AssetDatabase.LoadAllAssetsAtPath("ProjectSettings/TagManager.asset").FirstOrDefault();
+        if (tm == null) return;
+        var so = new SerializedObject(tm);
+        SerializedProperty layers = so.FindProperty("layers");
+        if (layers == null || layer >= layers.arraySize) return;
+        SerializedProperty p = layers.GetArrayElementAtIndex(layer);
+        if (p.stringValue == name) return;
+        if (!string.IsNullOrEmpty(p.stringValue)) { Warn("layer " + layer + " is named '" + p.stringValue + "'; the planar reflection uses it anyway"); return; }
+        p.stringValue = name;
+        so.ApplyModifiedPropertiesWithoutUndo();
     }
 
     // ------------------------------------------------------------------ lighting settings + bake
@@ -1233,11 +1663,17 @@ public static class AurelleRenderSetup
         }
         foreach (string p in paths) SetAndroidMax(p, 1024);
         foreach (var probe in Object.FindObjectsByType<ReflectionProbe>(FindObjectsInactive.Include, FindObjectsSortMode.None))
-            if (probe.bakedTexture) SetAndroidMax(AssetDatabase.GetAssetPath(probe.bakedTexture), 128);
+            if (probe.bakedTexture) SetAndroidMax(AssetDatabase.GetAssetPath(probe.bakedTexture), probe.name == HeroProbeName ? HeroProbeAndroidMax : 128);
         // The sky reflection cubemap generated by the bake (used by everything outside the probes).
         string folder = Path.Combine(Path.GetDirectoryName(scene.path), Path.GetFileNameWithoutExtension(scene.path)).Replace('\\', '/');
         if (ReflectionProbe.defaultTexture != null) SetAndroidMax(AssetDatabase.GetAssetPath(ReflectionProbe.defaultTexture), 128);
-        foreach (string guid in AssetDatabase.FindAssets("t:Cubemap", new[] { folder })) SetAndroidMax(AssetDatabase.GUIDToAssetPath(guid), 128);
+        var heroProbe = Object.FindObjectsByType<ReflectionProbe>(FindObjectsInactive.Include, FindObjectsSortMode.None).FirstOrDefault(rp => rp.name == HeroProbeName);
+        string heroPath = heroProbe != null && heroProbe.bakedTexture ? AssetDatabase.GetAssetPath(heroProbe.bakedTexture) : null;
+        foreach (string guid in AssetDatabase.FindAssets("t:Cubemap", new[] { folder }))
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            if (path != heroPath) SetAndroidMax(path, 128);
+        }
     }
 
     static void SetAndroidMax(string path, int max)

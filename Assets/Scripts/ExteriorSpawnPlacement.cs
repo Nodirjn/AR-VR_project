@@ -13,7 +13,8 @@ using XRInputDevice = UnityEngine.XR.InputDevice;
 /// <summary>
 /// Chooses desktop or XR mode before any other Awake and places the desktop camera or the XR Origin
 /// at the shared exterior start point. XR mode chosen only because an XR loader is running falls back to
-/// desktop when no headset display starts.
+/// desktop when no headset display starts. Android players (Quest) have no desktop mode: they always start
+/// in XR mode and wait for the headset display.
 /// </summary>
 [DefaultExecutionOrder(-10000)]
 [DisallowMultipleComponent]
@@ -89,9 +90,12 @@ public sealed class ExteriorSpawnPlacement : MonoBehaviour
         Physics.SyncTransforms();
     }
 
+    // Android players run on a headset without keyboard or mouse, so the desktop walkthrough is no use there.
+    private static bool DesktopModeAvailable => Application.platform != RuntimePlatform.Android;
+
     private static bool IsHeadsetActive()
     {
-        if (XRSettings.isDeviceActive) return true;
+        if (XRSettings.isDeviceActive || !DesktopModeAvailable) return true;
         // OpenXR starts its display only once the session is ready, which can be after the first Awake.
         XRGeneralSettings settings = XRGeneralSettings.Instance;
         return settings != null && settings.Manager != null && settings.Manager.activeLoader != null;
@@ -105,6 +109,9 @@ public sealed class ExteriorSpawnPlacement : MonoBehaviour
             Debug.Log("[Exterior Spawn] The headset display started; staying in XR mode.", this);
             return true;
         }
+        // On a headset the display can start late (not worn at launch, a system dialog, a slow first frame);
+        // keep waiting there instead of leaving the user in a desktop view they cannot control.
+        if (!DesktopModeAvailable) return false;
         if (headsetDeadline < 0f) headsetDeadline = Time.unscaledTime + HeadsetStartTimeout;
         if (Time.unscaledTime >= headsetDeadline) RevertToDesktop();
         return false;
@@ -125,8 +132,10 @@ public sealed class ExteriorSpawnPlacement : MonoBehaviour
         xrMode = true;
         waitingForHeadset = !XRSettings.isDeviceActive;
         if (waitingForHeadset)
-            Debug.Log("[Exterior Spawn] An XR loader is active but the headset display has not started yet; " +
-                      "XR mode falls back to desktop if it does not start within " + HeadsetStartTimeout + " s.", this);
+            Debug.Log(DesktopModeAvailable
+                ? "[Exterior Spawn] An XR loader is active but the headset display has not started yet; " +
+                  "XR mode falls back to desktop if it does not start within " + HeadsetStartTimeout + " s."
+                : "[Exterior Spawn] Waiting for the headset display; Android players have no desktop mode.", this);
 
         List<Transform> roots = FindSceneRoots();
         Transform rig = FindXrRig(roots);

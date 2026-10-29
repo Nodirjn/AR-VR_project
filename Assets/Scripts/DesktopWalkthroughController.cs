@@ -16,7 +16,7 @@ using UnityEngine.XR;
 /// swinging away from whoever opens them, and close autoDoorCloseDelay after the zone is clear; E toggles them.
 /// </summary>
 [DisallowMultipleComponent]
-public sealed class DesktopWalkthroughController : MonoBehaviour
+public sealed class DesktopWalkthroughController : MonoBehaviour, ICarExplorerStepBackBody
 {
     [SerializeField] private float walkingSpeed = 4.2f;
     [SerializeField] private float mouseSensitivity = 0.12f;
@@ -83,6 +83,15 @@ public sealed class DesktopWalkthroughController : MonoBehaviour
     private bool modelChanged;
     private bool modelWasMoving;
     private ICarExplorerModel boundModel;
+    // A step back for the explorer's framing (ICarExplorerStepBackBody): the whole horizontal offset, how much of it
+    // is done, its clock and length, and where the body was after the last glide step (moved by anything else, e.g.
+    // a respawn, the glide ends).
+    private bool stepBackActive;
+    private Vector3 stepBackOffset;
+    private Vector3 stepBackDone;
+    private float stepBackClock;
+    private float stepBackDuration;
+    private Vector3 stepBackLast;
     private Action modelChangedHandler;
     private Action<CarStructureNode> inspectRequestedHandler;
     private Action exitRequestedHandler;
@@ -139,12 +148,15 @@ public sealed class DesktopWalkthroughController : MonoBehaviour
         CarExplorerInspect.Requested += inspectRequestedHandler;
         CarExplorerInspect.ExitRequested -= exitRequestedHandler;
         CarExplorerInspect.ExitRequested += exitRequestedHandler;
+        CarExplorerStepBack.Register(this);
     }
 
     private void OnDisable()
     {
         CarExplorerInspect.Requested -= inspectRequestedHandler;
         CarExplorerInspect.ExitRequested -= exitRequestedHandler;
+        CarExplorerStepBack.Unregister(this);
+        stepBackActive = false;
         StopInspectNow();
         BindModel(null);
         if (active)
@@ -204,9 +216,11 @@ public sealed class DesktopWalkthroughController : MonoBehaviour
 
         if (inspectPhase != InspectPhase.Orbit)
         {
+            bool looked = false;
             if (Cursor.lockState == CursorLockMode.Locked && mouse != null)
             {
                 Vector2 delta = mouse.delta.ReadValue();
+                looked = delta.sqrMagnitude > 0.25f;
                 yaw += delta.x * mouseSensitivity;
                 pitch = Mathf.Clamp(pitch - delta.y * mouseSensitivity, -80f, 80f);
                 if (inspectPhase == InspectPhase.Off) ApplyLook();
@@ -226,7 +240,9 @@ public sealed class DesktopWalkthroughController : MonoBehaviour
 
             if (character.isGrounded && verticalSpeed < 0f) verticalSpeed = -2f;
             verticalSpeed += gravity * Time.deltaTime;
-            character.Move((movement * walkingSpeed + Vector3.up * verticalSpeed) * Time.deltaTime);
+            Vector3 glide = NextStepBack(movement.sqrMagnitude > 0f || looked);
+            character.Move((movement * walkingSpeed + Vector3.up * verticalSpeed) * Time.deltaTime + glide);
+            stepBackLast = body.position;
             if (body.position.y < ShowroomCollisionSetup.RespawnBelowHeight) Respawn();
         }
 
@@ -876,6 +892,68 @@ public sealed class DesktopWalkthroughController : MonoBehaviour
         // Then yaw: the pitched direction turned onto the target's azimuth.
         float yawRadians = Mathf.Atan2(w.x, w.z) - Mathf.Atan2(d.x, pitched);
         return Quaternion.Euler(theta * Mathf.Rad2Deg, yawRadians * Mathf.Rad2Deg, 0f);
+    }
+
+    // ---------------------------------------------------------------- step back (ICarExplorerStepBackBody)
+
+    public bool CanStepBack => isActiveAndEnabled && character != null && character.enabled && IsDesktopActive &&
+                               inspectPhase == InspectPhase.Off;
+
+    public Vector3 StepBackRemaining => stepBackActive ? stepBackOffset - stepBackDone : Vector3.zero;
+
+    // The body's capsule (its bottom lifted by the step offset, so the floor and low steps do not count) swept along
+    // the direction; colliders it already touches (its own) are not hit.
+    public float GetStepBackReach(Vector3 direction, float max)
+    {
+        direction.y = 0f;
+        if (!CanStepBack || max <= 0f || direction.sqrMagnitude < 1e-4f) return 0f;
+        direction.Normalize();
+        float radius = character.radius;
+        Vector3 feet = body.position;
+        Vector3 bottom = feet + Vector3.up * (character.stepOffset + radius + 0.02f);
+        Vector3 top = feet + Vector3.up * Mathf.Max(character.stepOffset + radius + 0.02f, character.height - radius);
+        float skin = character.skinWidth + 0.05f;
+        if (Physics.CapsuleCast(bottom, top, radius, direction, out RaycastHit hit, max + skin,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+            return Mathf.Clamp(hit.distance - skin, 0f, max);
+        return max;
+    }
+
+    public void StepBack(Vector3 offset, float duration)
+    {
+        offset.y = 0f;
+        if (!CanStepBack || offset.sqrMagnitude < 1e-6f)
+        {
+            stepBackActive = false;
+            return;
+        }
+        stepBackActive = true;
+        stepBackOffset = offset;
+        stepBackDone = Vector3.zero;
+        stepBackClock = 0f;
+        stepBackDuration = Mathf.Max(0.05f, duration);
+        stepBackLast = body.position;
+    }
+
+    // This frame's share of the glide (smoothstep over its length); the visitor taking over (a walking key, mouse
+    // look), the inspect camera or the body moved by anything else ends it.
+    private Vector3 NextStepBack(bool takeOver)
+    {
+        if (!stepBackActive) return Vector3.zero;
+        Vector3 drift = body.position - stepBackLast;
+        drift.y = 0f;
+        if (takeOver || inspectPhase != InspectPhase.Off || drift.sqrMagnitude > 0.09f)
+        {
+            stepBackActive = false;
+            return Vector3.zero;
+        }
+        stepBackClock += Time.deltaTime;
+        float u = Mathf.Clamp01(stepBackClock / stepBackDuration);
+        Vector3 want = stepBackOffset * (u * u * (3f - 2f * u));
+        Vector3 step = want - stepBackDone;
+        stepBackDone = want;
+        if (u >= 1f) stepBackActive = false;
+        return step;
     }
 
     private void OnGUI()

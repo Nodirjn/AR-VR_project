@@ -21,11 +21,11 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: Car_Concept_Caliper_Red
-  m_Shader: {fileID: -6465566751694194690, guid: b9d29dfa1474148e792ac720cbd45122, type: 3}
+  m_Shader: {fileID: -6465566751694194690, guid: c18c97ae1ce021b4980c5d19a54f0d3c, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords:
-  - _OCCLUSION
+  - _CLEARCOAT
   - _TEXTURE_TRANSFORM
   m_InvalidKeywords:
   - _UV_CHANNEL_SELECT
@@ -41,9 +41,21 @@ Material:
   m_SavedProperties:
     serializedVersion: 3
     m_TexEnvs:
-    - baseColorTexture:
+    - _PBRmetallicroughnessadvanced_2d82b8f2c2ed4d4ca637330d4d181e38_ClearcoatNormalTexture_452824629_Texture2D:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - baseColorTexture:
+        m_Texture: {fileID: 2800000, guid: fe8a5199fbdab41ba886d25cd4ad67d3, type: 3}
+        m_Scale: {x: 1, y: -1}
+        m_Offset: {x: 0, y: 1}
+    - clearcoatRoughnessTexture:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 0, y: 0}
+        m_Offset: {x: 0, y: 0}
+    - clearcoatTexture:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 0, y: 0}
         m_Offset: {x: 0, y: 0}
     - emissiveTexture:
         m_Texture: {fileID: 0}
@@ -58,7 +70,7 @@ Material:
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - occlusionTexture:
-        m_Texture: {fileID: -3260640993307099278, guid: aef83db4810554d0caf58716e887bd45, type: 3}
+        m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: -1}
         m_Offset: {x: 0, y: 1}
     - transmissionTexture:
@@ -110,6 +122,10 @@ Material:
     - _ZWriteControl: 0
     - alphaCutoff: 0
     - baseColorTexture_texCoord: 0
+    - clearcoatFactor: 1
+    - clearcoatRoughnessFactor: 0.04
+    - clearcoatRoughnessTexture_texCoord: 0
+    - clearcoatTexture_texCoord: 0
     - emissiveExposureWeight: 0
     - emissiveTexture_texCoord: 0
     - metallicFactor: 0
@@ -118,11 +134,13 @@ Material:
     - normalTexture_texCoord: 0
     - occlusionTexture_strength: 0.85
     - occlusionTexture_texCoord: 1
-    - roughnessFactor: 0.28
+    - roughnessFactor: 0.32
     - transmissionFactor: 0
     m_Colors:
-    - baseColorFactor: {r: 0.62, g: 0.03, b: 0.03, a: 1}
+    - baseColorFactor: {r: 1, g: 1, b: 1, a: 1}
     - baseColorTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
+    - clearcoatRoughnessTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
+    - clearcoatTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
     - emissiveFactor: {r: 0, g: 0, b: 0, a: 1}
     - emissiveTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
     - metallicRoughnessTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}

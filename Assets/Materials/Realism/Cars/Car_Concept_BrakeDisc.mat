@@ -42,21 +42,21 @@ Material:
     serializedVersion: 3
     m_TexEnvs:
     - baseColorTexture:
-        m_Texture: {fileID: -3112187905955043861, guid: aef83db4810554d0caf58716e887bd45, type: 3}
-        m_Scale: {x: 20, y: -10}
-        m_Offset: {x: 0, y: 10}
+        m_Texture: {fileID: 2800000, guid: 26908d988318448049ad7b0b85e69bf5, type: 3}
+        m_Scale: {x: 1, y: 2}
+        m_Offset: {x: 0, y: -1}
     - emissiveTexture:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - metallicRoughnessTexture:
-        m_Texture: {fileID: 0}
-        m_Scale: {x: 1, y: 1}
-        m_Offset: {x: 0, y: 0}
+        m_Texture: {fileID: 2800000, guid: 5f12093ddddf14345be0c2d3f759bcac, type: 3}
+        m_Scale: {x: 1, y: 2}
+        m_Offset: {x: 0, y: -1}
     - normalTexture:
-        m_Texture: {fileID: 9072189059158080921, guid: aef83db4810554d0caf58716e887bd45, type: 3}
-        m_Scale: {x: 20, y: -10}
-        m_Offset: {x: 0, y: 10}
+        m_Texture: {fileID: 2800000, guid: 25718c4a9752245efb52ef2c6d9bc494, type: 3}
+        m_Scale: {x: 1, y: 2}
+        m_Offset: {x: 0, y: -1}
     - occlusionTexture:
         m_Texture: {fileID: -3260640993307099278, guid: aef83db4810554d0caf58716e887bd45, type: 3}
         m_Scale: {x: 1, y: -1}
@@ -118,10 +118,10 @@ Material:
     - normalTexture_texCoord: 0
     - occlusionTexture_strength: 0.85
     - occlusionTexture_texCoord: 1
-    - roughnessFactor: 0.42
+    - roughnessFactor: 1
     - transmissionFactor: 0
     m_Colors:
-    - baseColorFactor: {r: 0.62, g: 0.62, b: 0.63, a: 1}
+    - baseColorFactor: {r: 1, g: 1, b: 1, a: 1}
     - baseColorTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
     - emissiveFactor: {r: 0, g: 0, b: 0, a: 1}
     - emissiveTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}

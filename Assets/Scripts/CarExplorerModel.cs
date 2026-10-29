@@ -157,3 +157,34 @@ public static class CarExplorerInspect
         ActiveChanged?.Invoke();
     }
 }
+
+/// <summary>
+/// The desktop walking body, as the explorer's framing sees it. When a taken-out assembly has no place in view from
+/// where the visitor stands, the explorer glides the body straight back from the car during the move, to where it
+/// has one (CarExplorerController.TryStepBack). DesktopWalkthroughController provides it while it is enabled.
+/// </summary>
+public interface ICarExplorerStepBackBody
+{
+    /// <summary>True while the body walks in desktop mode with the inspect camera off (never in XR).</summary>
+    bool CanStepBack { get; }
+    /// <summary>What is left of the current glide (horizontal), zero when none runs.</summary>
+    Vector3 StepBackRemaining { get; }
+    /// <summary>How far (up to `max`) the body can glide along a horizontal direction without running into anything.</summary>
+    float GetStepBackReach(Vector3 direction, float max);
+    /// <summary>Glides the body by this horizontal offset over `duration` s (smoothstep), keeping its yaw and pitch;
+    /// a walking key or mouse look ends it.</summary>
+    void StepBack(Vector3 offset, float duration);
+}
+
+/// <summary>Where the explorer finds the walking body for a step back (null without one, and in XR).</summary>
+public static class CarExplorerStepBack
+{
+    public static ICarExplorerStepBackBody Body { get; private set; }
+
+    public static void Register(ICarExplorerStepBackBody body) => Body = body;
+
+    public static void Unregister(ICarExplorerStepBackBody body)
+    {
+        if (Body == body) Body = null;
+    }
+}

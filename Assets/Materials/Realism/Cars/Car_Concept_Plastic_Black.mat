@@ -54,7 +54,7 @@ Material:
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - normalTexture:
-        m_Texture: {fileID: -7418166437116789001, guid: aef83db4810554d0caf58716e887bd45, type: 3}
+        m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: -1}
         m_Offset: {x: 0, y: 1}
     - occlusionTexture:
@@ -118,7 +118,7 @@ Material:
     - normalTexture_texCoord: 0
     - occlusionTexture_strength: 1
     - occlusionTexture_texCoord: 1
-    - roughnessFactor: 0.55
+    - roughnessFactor: 0.62
     - transmissionFactor: 0
     m_Colors:
     - baseColorFactor: {r: 0.05, g: 0.05, b: 0.052, a: 1}

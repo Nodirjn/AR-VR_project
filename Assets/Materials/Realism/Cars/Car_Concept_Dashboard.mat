@@ -60,7 +60,7 @@ Material:
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
     - emissiveTexture:
-        m_Texture: {fileID: -5523929372558175593, guid: aef83db4810554d0caf58716e887bd45, type: 3}
+        m_Texture: {fileID: 2800000, guid: e3d5e2f59849c481e800b1503524d024, type: 3}
         m_Scale: {x: 1, y: -1}
         m_Offset: {x: 0, y: 1}
     - metallicRoughnessTexture:
@@ -132,12 +132,12 @@ Material:
     - normalTexture_texCoord: 0
     - occlusionTexture_strength: 0.85
     - occlusionTexture_texCoord: 1
-    - roughnessFactor: 0.12
+    - roughnessFactor: 0.1
     - transmissionFactor: 0
     m_Colors:
     - baseColorFactor: {r: 0.02, g: 0.02, b: 0.022, a: 1}
     - baseColorTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
-    - emissiveFactor: {r: 1, g: 0.25902733, b: 0, a: 1}
+    - emissiveFactor: {r: 1.2381744, g: 1.2381744, b: 1.2381744, a: 1.6}
     - emissiveTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
     - metallicRoughnessTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}
     - normalTexture_Rotation: {r: 0, g: 0, b: 0, a: 0}

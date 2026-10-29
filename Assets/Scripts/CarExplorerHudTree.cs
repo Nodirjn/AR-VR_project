@@ -9,13 +9,17 @@ using UnityEngine.UI;
 /// k, k + pool, ...), so scrolling one row rebinds one row and a tree of a thousand nodes costs what a short one does.
 /// The path to the selection, the assembly that is out and every level that is apart open by themselves. A name too
 /// long for its row is cut so that it still tells the row from its siblings ("Rocker Arm A… 5"); fitted names are
-/// cached per node, language and width.
+/// cached per node, language and width. On the XR plate the panel has its own header (STRUCTURE, the part count and a
+/// chevron that folds it to that line); on the desktop the HUD's STRUCTURE tab in the top bar opens and closes it, so
+/// the panel is the list alone and is hidden while collapsed.
 /// </summary>
 public sealed class CarExplorerHudTree
 {
     public const float RowHeight = 32f;
     public const float HeaderHeight = 48f;
     public const float BottomPadding = 8f;
+    // Above the first row when the panel has no header (the desktop).
+    private const float ListTop = 8f;
     // Systems and assemblies step in 14 units a level, deeper levels 10, so a part six levels down keeps its name.
     private const float Indent = 14f;
     private const float DeepIndent = 10f;
@@ -23,6 +27,8 @@ public sealed class CarExplorerHudTree
     // Name column: after the chevron or bullet, and before the count, the out / apart dot and the explode button.
     private const float NameLead = 26f;
     private const float BranchTrail = 100f;
+    // A narrow panel (the HUD's compact layout) drops the part-count column, so names keep 36 units more.
+    private const float NarrowBranchTrail = 64f;
     private const float LeafTrail = 28f;
     public const string Ellipsis = "…";
     private const float DoubleClickSeconds = 0.4f;
@@ -50,6 +56,8 @@ public sealed class CarExplorerHudTree
     private readonly CarExplorerHudButton header;
     private readonly Image divider;
     private bool collapsed;
+    private bool headerShown = true;
+    private bool narrow;
     private float panelWidth;
     // Never drawn: measures names for fitting (measuring a shown text would replace what it draws).
     private readonly TextMeshProUGUI probe;
@@ -158,6 +166,26 @@ public sealed class CarExplorerHudTree
         Rebind(true);
     }
 
+    /// <summary>
+    /// The narrow layout (small windows): rows show no part count, which leaves the names more room. Re-fits every name.
+    /// </summary>
+    public void SetNarrow(bool value)
+    {
+        if (narrow == value) return;
+        narrow = value;
+        fitted.Clear();
+        for (int i = 0; i < rows.Count; i++)
+        {
+            rows[i].TextDepth = -1;
+            rows[i].TextWidth = -1f;
+        }
+        Rebind(true);
+    }
+
+    public bool Narrow => narrow;
+
+    private float Trail(bool branch) => branch ? (narrow ? NarrowBranchTrail : BranchTrail) : LeafTrail;
+
     /// <summary>Left edge of a row's chevron or bullet at this depth.</summary>
     public static float IndentOf(int depth) =>
         RowInset + Mathf.Min(depth, 2) * Indent + Mathf.Max(0, depth - 2) * DeepIndent;
@@ -169,8 +197,7 @@ public sealed class CarExplorerHudTree
     public float NameWidth(CarStructureNode node)
     {
         if (panelWidth <= 0f || node == null) return 0f;
-        float trail = node.Children.Count > 0 ? BranchTrail : LeafTrail;
-        return panelWidth - IndentOf(node.Depth) - NameLead - trail;
+        return panelWidth - IndentOf(node.Depth) - NameLead - Trail(node.Children.Count > 0);
     }
 
     private string Fitted(CarStructureNode node, bool uzbek)
@@ -279,19 +306,43 @@ public sealed class CarExplorerHudTree
         return i;
     }
 
+    /// <summary>Height above the first row: the header on the plate, a small inset on the desktop.</summary>
+    public float TopInset => headerShown ? HeaderHeight + 4f : ListTop;
+
     /// <summary>Height the panel needs to show every visible row (just the header while folded).</summary>
     public float PreferredHeight =>
-        collapsed ? HeaderHeight : HeaderHeight + 4f + Mathf.Max(1, visible.Count) * RowHeight + BottomPadding;
+        collapsed ? HeaderHeight : TopInset + Mathf.Max(1, visible.Count) * RowHeight + BottomPadding;
+
+    /// <summary>Height of the panel that shows `rows` rows.</summary>
+    public float HeightForRows(int rows) => TopInset + rows * RowHeight + BottomPadding;
 
     public bool Collapsed => collapsed;
 
-    public void ToggleCollapsed()
+    public bool HeaderShown => headerShown;
+
+    public void ToggleCollapsed() => SetCollapsed(!collapsed);
+
+    public void SetCollapsed(bool fold)
     {
-        collapsed = !collapsed;
+        if (collapsed == fold) return;
+        collapsed = fold;
         viewport.gameObject.SetActive(!collapsed);
-        divider.enabled = !collapsed;
+        divider.enabled = !collapsed && headerShown;
         if (collapsed) thumb.enabled = false;
         header.Icon.rectTransform.localEulerAngles = new Vector3(0f, 0f, collapsed ? 0f : -90f);
+        hud.OnTreeSizeChanged();
+    }
+
+    /// <summary>The panel's own header (the XR plate) or the list alone under the desktop's STRUCTURE tab.</summary>
+    public void SetHeaderShown(bool shown)
+    {
+        if (headerShown == shown) return;
+        headerShown = shown;
+        header.gameObject.SetActive(shown);
+        title.gameObject.SetActive(shown);
+        total.gameObject.SetActive(shown);
+        divider.enabled = shown && !collapsed;
+        CarExplorerHudStyle.Stretch(viewport, 0f, 0f, TopInset, BottomPadding);
         hud.OnTreeSizeChanged();
     }
 
@@ -480,7 +531,7 @@ public sealed class CarExplorerHudTree
         bool show = !collapsed && contentHeight > viewportHeight + 1f;
         if (thumb.enabled != show) thumb.enabled = show;
         if (!show) return;
-        float trackTop = HeaderHeight + 8f;
+        float trackTop = TopInset + 4f;
         float track = viewportHeight - 8f;
         float size = Mathf.Max(24f, track * viewportHeight / contentHeight);
         float t = Mathf.Clamp01(content.anchoredPosition.y / (contentHeight - viewportHeight));
@@ -515,9 +566,10 @@ public sealed class CarExplorerHudTree
             row.Bullet.rectTransform.anchoredPosition = new Vector2(x + 6f, 0f);
             RectTransform name = row.Name.rectTransform;
             name.offsetMin = new Vector2(x + NameLead, 0f);
-            name.offsetMax = new Vector2(branch ? -BranchTrail : -LeafTrail, 0f);
-            // Right side, from the edge: explode button, part count, out / apart dot.
-            row.StatusDot.rectTransform.anchoredPosition = new Vector2(branch ? -84f : -12f, 0f);
+            name.offsetMax = new Vector2(-Trail(branch), 0f);
+            // Right side, from the edge: explode button, part count (not in the narrow layout), out / apart dot.
+            row.StatusDot.rectTransform.anchoredPosition = new Vector2(branch ? (narrow ? -48f : -84f) : -12f, 0f);
+            row.Count.enabled = !narrow;
         }
         if (branch) row.Chevron.Icon.rectTransform.localEulerAngles = new Vector3(0f, 0f, IsExpanded(node) ? -90f : 0f);
         ApplyState(row);

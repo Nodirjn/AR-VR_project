@@ -365,6 +365,7 @@ namespace CarInternals
             to.vertices = from.vertices;
             to.normals = from.normals;
             to.uv = from.uv;
+            to.tangents = from.tangents;
             to.subMeshCount = from.subMeshCount;
             for (int s = 0; s < from.subMeshCount; s++) to.SetTriangles(from.GetTriangles(s), s, false);
             to.RecalculateBounds();

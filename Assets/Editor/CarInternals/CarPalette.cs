@@ -8,15 +8,69 @@ namespace CarInternals
 {
     /// <summary>
     /// URP Lit materials for the internals, written to Assets/Materials/CarInternals (updated in place, so their GUIDs
-    /// stay). Flat PBR values chosen to read as an engineering model and to stay distinct through the X-ray glass:
-    /// light zinc and machined metal, near-black paint and rubber, coloured accents for springs and calipers. No
-    /// textures, so every material works on the Quest (Low) renderer and in the SRP Batcher.
+    /// stay). The colours keep the engineering colour code (light zinc and machined metal, near-black paint and rubber,
+    /// coloured springs, calipers and high-voltage parts) and stay distinct through the X-ray glass; each material also
+    /// gets the finish its part really has (Finishes): a tileable base map whose RGB varies the colour around the
+    /// material's own and whose alpha is the smoothness map (URP's Albedo Alpha source), and a normal map, from
+    /// CarTextures. The mesh kit's UVs are in metres, so a finish's tile is a physical size. Metallic stays one value per
+    /// material. Plain URP Lit with two maps, so the materials stay SRP Batcher compatible and cheap on the Quest.
     /// </summary>
     public sealed class CarPalette
     {
         public const string Folder = "Assets/Materials/CarInternals";
         private static Shader lit;
         private readonly Dictionary<string, Material> cache = new Dictionary<string, Material>();
+        private readonly CarTextures textures = new CarTextures();
+
+        /// <summary>A CarTextureSynth surface, its tile size in metres and the normal strength.</summary>
+        private readonly struct Finish
+        {
+            public readonly string Surface;
+            public readonly float Tile, Bump;
+
+            public Finish(string surface, float tile, float bump = 1f)
+            {
+                Surface = surface;
+                Tile = tile;
+                Bump = bump;
+            }
+        }
+
+        // Finish per material name, including the materials the subsystems define through Get. Chrome stays plain.
+        private static readonly Dictionary<string, Finish> Finishes = new Dictionary<string, Finish>
+        {
+            { "CI_Steel_ZincPlated", new Finish("Zinc", 0.12f) },
+            { "CI_Steel_BlackPainted", new Finish("ECoat", 0.12f, 0.5f) },
+            { "CI_Steel_Forged", new Finish("Forged", 0.2f) },
+            { "CI_Steel_Machined", new Finish("Machined", 0.08f) },
+            { "CI_Iron_Cast", new Finish("Cast", 0.2f) },
+            { "CI_Aluminium_Machined", new Finish("Machined", 0.08f) },
+            { "CI_Aluminium_Cast", new Finish("Cast", 0.2f, 0.8f) },
+            { "CI_Copper", new Finish("Machined", 0.08f, 0.6f) },
+            { "CI_Brass", new Finish("Machined", 0.08f, 0.6f) },
+            { "CI_Aluminium_HeatShield", new Finish("HeatShield", 0.06f) },
+            { "CI_Hose_Braided", new Finish("Braid", 0.032f) },
+            // Red: anodised turned parts (spring perches). Yellow is mostly the powder-coated coil springs.
+            { "CI_Anodised_Red", new Finish("Machined", 0.08f, 0.6f) },
+            { "CI_Anodised_Yellow", new Finish("ECoat", 0.07f, 0.45f) },
+            { "CI_Paint_SpringBlue", new Finish("ECoat", 0.07f, 0.45f) },
+            { "CI_Plastic_OrangeHV", new Finish("Plastic", 0.08f) },
+            { "CI_Rubber", new Finish("Rubber", 0.08f) },
+            { "CI_Plastic_Black", new Finish("Plastic", 0.08f) },
+            { "CI_Plastic_Grey", new Finish("Plastic", 0.08f) },
+            { "CI_Plastic_BatteryCase", new Finish("Plastic", 0.16f) },
+            { "CI_Wire_Red", new Finish("Rubber", 0.05f, 0.6f) },
+            { "CI_Wire_Black", new Finish("Loom", 0.048f) },
+            // The level line sits at a fixed height above the tank's centre, so this tile is part of the design.
+            { "CI_Plastic_TranslucentReservoir", new Finish("Reservoir", 0.25f) },
+            { "CI_Steel_BodyECoat", new Finish("ECoat", 0.15f, 0.6f) },
+            { "CI_Steel_PressHardened", new Finish("Zinc", 0.2f, 1.4f) },
+            { "CI_Aluminium_Extruded", new Finish("Drawn", 0.12f) },
+            { "CI_Friction_Lining", new Finish("Friction", 0.1f) },
+            { "CI_Aluminium_HeatExchangerFin", new Finish("Fin", 0.0512f) },
+            { "CI_Lead_Alloy", new Finish("Cast", 0.1f, 0.7f) },
+            { "CI_Brake_CopperNickel", new Finish("Drawn", 0.05f) },
+        };
 
         // Metals
         public Material ZincSteel => Get("CI_Steel_ZincPlated", new Color(0.70f, 0.72f, 0.74f), 1f, 0.58f);
@@ -49,6 +103,14 @@ namespace CarInternals
 
         public int Count => cache.Count;
 
+        /// <summary>Texture files the finishes wrote in this build (0 when nothing changed).</summary>
+        public int TexturesWritten => textures.Written;
+
+        /// <summary>
+        /// The material of that name with these values (created or updated in place). The colour, metallic and smoothness
+        /// are the material's averages: a finish divides the colour by its map's mean colour and the smoothness by the
+        /// map's mean smoothness factor (for the transparent reservoir: the opacity by the mean opacity factor).
+        /// </summary>
         public Material Get(string name, Color baseColor, float metallic, float smoothness, bool transparent = false)
         {
             if (cache.TryGetValue(name, out Material cached)) return cached;
@@ -64,15 +126,40 @@ namespace CarInternals
             {
                 m.shader = lit;
             }
+            Texture2D baseMap = null, normalMap = null;
+            Vector2 tiling = Vector2.one;
+            float bump = 1f, channel = 0f;
+            if (Finishes.TryGetValue(name, out Finish finish))
+            {
+                CarTextures.Surface s = textures.Get(finish.Surface);
+                baseMap = s.Base;
+                normalMap = s.Normal;
+                tiling = Vector2.one * (1f / finish.Tile);
+                bump = finish.Bump;
+                float k = 1f / Mathf.Max(0.2f, s.MeanColour);
+                baseColor = new Color(Mathf.Min(1f, baseColor.r * k), Mathf.Min(1f, baseColor.g * k), Mathf.Min(1f, baseColor.b * k), baseColor.a);
+                if (transparent)
+                {
+                    baseColor.a = Mathf.Min(1f, baseColor.a / Mathf.Max(0.2f, s.MeanAlpha));
+                }
+                else
+                {
+                    smoothness = Mathf.Min(1f, smoothness / Mathf.Max(0.2f, s.MeanAlpha));
+                    channel = 1f;
+                }
+            }
             m.SetFloat("_WorkflowMode", 1f);
             m.SetColor("_BaseColor", baseColor);
-            m.SetTexture("_BaseMap", null);
-            m.SetTexture("_BumpMap", null);
+            m.SetTexture("_BaseMap", baseMap);
+            m.SetTextureScale("_BaseMap", tiling);
+            m.SetTextureOffset("_BaseMap", Vector2.zero);
+            m.SetTexture("_BumpMap", normalMap);
+            m.SetFloat("_BumpScale", bump);
             m.SetTexture("_MetallicGlossMap", null);
             m.SetTexture("_OcclusionMap", null);
             m.SetFloat("_Metallic", metallic);
             m.SetFloat("_Smoothness", smoothness);
-            m.SetFloat("_SmoothnessTextureChannel", 0f);
+            m.SetFloat("_SmoothnessTextureChannel", channel);
             m.SetFloat("_SpecularHighlights", 1f);
             m.SetFloat("_EnvironmentReflections", 1f);
             m.SetFloat("_ReceiveShadows", 1f);
@@ -91,11 +178,17 @@ namespace CarInternals
             return m;
         }
 
-        /// <summary>Every palette entry, created now (so the folder always holds the full palette).</summary>
+        /// <summary>
+        /// Every palette entry, created now (so the folder always holds the full palette), and the maps of surfaces no
+        /// finish uses any more removed.
+        /// </summary>
         public void CreateAll()
         {
             foreach (var p in typeof(CarPalette).GetProperties())
                 if (p.PropertyType == typeof(Material)) p.GetValue(this);
+            var used = new HashSet<string>();
+            foreach (Finish f in Finishes.Values) used.Add(f.Surface);
+            textures.RemoveUnused(used);
         }
     }
 }

@@ -22,7 +22,7 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
     private Material redOn, redOff, amberOn, amberOff, greenOn, greenOff, walkOn, walkOff;
     private Material tire, wheelMetal, headlight, tailLight, carBlue, carSilver, carRed, carWhite;
     private GameObject[] trafficVehiclePrefabs;
-    private Mesh groundMesh, hillMesh, sedanBodyMesh, sedanCabinMesh, bicycleWheelMesh;
+    private Mesh groundMesh, hillMesh, sedanBodyMesh, sedanCabinMesh;
     private readonly List<Vector3> plantedTrees = new List<Vector3>();
     // World footprints of the buildings' facade masses; curbs, sidewalks, trees and lamps keep clear of them.
     private readonly List<Rect> buildingFootprints = new List<Rect>();
@@ -178,7 +178,6 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         hillMesh = BuildHillMeshAsset();
         sedanBodyMesh = BuildSedanMeshAsset("TrafficSedanBody", false);
         sedanCabinMesh = BuildSedanMeshAsset("TrafficSedanCabin", true);
-        bicycleWheelMesh = BuildBicycleWheelAsset();
         // Traffic agents drive along +Z; the Tesla model's nose points along -Z.
         trafficVehiclePrefabs = new[]
         {
@@ -821,56 +820,29 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
 
     private void CreateCyclist(Transform parent,string name,Transform[] route,int startIndex,ExteriorTrafficSignal[] signals)
     {
+        // Cyclists take the bicycle palettes in creation order (the order ApplyCrowdLooks and Aurelle > Realism > Bicycles use).
+        int variant=parent.GetComponentsInChildren<ExteriorCyclistAgent>(true).Length;
         GameObject root=new GameObject(name);
         root.transform.SetParent(parent,false);
         root.transform.position=route[startIndex].position;
-        Transform bike=NewEmpty("Bicycle",root.transform);
-        MeshObject("Rear Alloy Wheel",bike,bicycleWheelMesh,tire,new Vector3(0f,.40f,-.85f),false,false).transform.localRotation=Quaternion.Euler(0f,0f,90f);
-        MeshObject("Front Alloy Wheel",bike,bicycleWheelMesh,tire,new Vector3(0f,.40f,.85f),false,false).transform.localRotation=Quaternion.Euler(0f,0f,90f);
-        Cylinder(bike,"Rear Wheel Hub",new Vector3(0f,.40f,-.85f),.12f,.16f,wheelMetal,new Vector3(0f,0f,90f),false);
-        Cylinder(bike,"Front Wheel Hub",new Vector3(0f,.40f,.85f),.12f,.16f,wheelMetal,new Vector3(0f,0f,90f),false);
-        Tube(bike,new Vector3(0f,.40f,-.85f),new Vector3(0f,.45f,-.08f),.045f,metal,false);
-        Tube(bike,new Vector3(0f,.45f,-.08f),new Vector3(0f,1.02f,-.42f),.045f,metal,false);
-        Tube(bike,new Vector3(0f,1.02f,-.42f),new Vector3(0f,.95f,.46f),.045f,metal,false);
-        Tube(bike,new Vector3(0f,.95f,.46f),new Vector3(0f,.45f,-.08f),.045f,metal,false);
-        Tube(bike,new Vector3(0f,.40f,-.85f),new Vector3(0f,1.02f,-.42f),.045f,gold,false);
-        Tube(bike,new Vector3(0f,1.02f,-.42f),new Vector3(0f,.40f,-.85f),.045f,metal,false);
-        Tube(bike,new Vector3(0f,.95f,.46f),new Vector3(0f,.40f,.85f),.052f,metal,false);
-        Tube(bike,new Vector3(0f,.95f,.46f),new Vector3(0f,1.22f,.57f),.04f,metal,false);
-        // A swept-back stem brings the bar within reach of the rider leaning forward: centre (0,1.20,0.24), grips at about x=±0.22.
-        Tube(bike,new Vector3(0f,1.22f,.57f),new Vector3(0f,1.20f,.24f),.04f,metal,false);
-        // A seat post rises from the seat cluster into a rounded saddle; the rider's pelvis sits on its top at (0,1.18,-0.36).
-        // The saddle stays inside the seated rider's shorts, clear of the shirt hanging over the thighs.
-        Tube(bike,new Vector3(0f,1.0f,-.42f),new Vector3(0f,1.14f,-.42f),.032f,metal,false);
-        GameObject saddle=GameObject.CreatePrimitive(PrimitiveType.Sphere); saddle.name="Saddle"; saddle.transform.SetParent(bike,false);
-        saddle.transform.localPosition=new Vector3(0f,1.155f,-.36f); saddle.transform.localScale=new Vector3(.12f,.05f,.18f);
-        saddle.GetComponent<Renderer>().sharedMaterial=tire; DestroyImmediate(saddle.GetComponent<Collider>());
-        Cylinder(bike,"Handlebar",new Vector3(0f,1.20f,.24f),.045f,.52f,metal,new Vector3(0f,0f,90f),false);
-        // Bottom-bracket axle and one crank per side: the arm runs 0.14 m up its pivot's local Y to the pedal body, which sits
-        // outboard on its end. Each pivot turns about its local X; the cyclist agent keeps the pedal bodies level.
-        Cylinder(bike,"Bottom Bracket Axle",new Vector3(0f,.45f,-.08f),.035f,.26f,wheelMetal,new Vector3(0f,0f,90f),false);
-        Transform leftPedal=NewEmpty("Left Pedal",bike); leftPedal.localPosition=new Vector3(-.12f,.45f,-.08f);
-        Transform rightPedal=NewEmpty("Right Pedal",bike); rightPedal.localPosition=new Vector3(.12f,.45f,-.08f);
-        foreach(Transform crank in new[]{leftPedal,rightPedal})
-        {
-            float side=Mathf.Sign(crank.localPosition.x);
-            Box(crank,"Crank Arm",new Vector3(0f,.07f,0f),new Vector3(.025f,.17f,.035f),wheelMetal,false,null,false);
-            Box(crank,"Pedal",new Vector3(side*.05f,.14f,0f),new Vector3(.08f,.022f,.06f),tire,false,null,false);
-        }
+        // The procedural city bicycle (ExteriorBicycleBuilder): wheels on their hub axles, crank pivots with their pedals,
+        // the saddle with its Sit Point and the handlebar with its grips, as the cyclist agent expects.
+        ExteriorBicycleBuilder.Parts bike=ExteriorBicycleBuilder.Build(root.transform,variant);
 
         GameObject prefab=AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Models/Presenter/Remy.fbx");
         if(prefab!=null)
         {
             GameObject rider=(GameObject)PrefabUtility.InstantiatePrefab(prefab,root.transform);
             rider.name="Cyclist Rider";
-            // A 1.7 m rider fits this frame: seated on the saddle, its legs reach the pedals with the knee bending about 30-105
-            // degrees over a turn. The agent then moves the Hips bone onto the saddle's top and poses the rider.
+            // A 1.7 m rider: the agent moves the Hips bone onto the saddle's Sit Point and poses the rider; the seat post is
+            // then fitted to its legs (the knee bends about 30 degrees at the bottom of the stroke).
             rider.transform.localPosition=new Vector3(0f,.27f,-.35f);
             rider.transform.localScale=Vector3.one*.45f;
             Animator anim=rider.GetComponent<Animator>(); if(anim!=null)anim.runtimeAnimatorController=null;
             // The rider's outfit is a saved material assignment (CyclistLooks, applied by ApplyCrowdLooks): a property block would not be saved with the scene.
             ExteriorCyclistAgent agent=root.AddComponent<ExteriorCyclistAgent>();
-            agent.Configure(route,4.2f,rider.transform,leftPedal,rightPedal,signals);
+            agent.Configure(route,4.2f,rider.transform,bike.LeftCrank,bike.RightCrank,signals);
+            Debug.Log("[Exterior] "+ExteriorBicycleBuilder.Seat(agent,bike),root);
             agent.SetStartIndex(startIndex+1);
         }
     }
@@ -1386,19 +1358,6 @@ public sealed class ExteriorEnvironmentBuilder : MonoBehaviour
         int n=0;for(int r=0;r<ring.Length-1;r++)for(int i=0;i<sides;i++){int a=r*sides+i,b=r*sides+(i+1)%sides,c=(r+1)*sides+i,d=(r+1)*sides+(i+1)%sides;triangles[n++]=a;triangles[n++]=c;triangles[n++]=b;triangles[n++]=b;triangles[n++]=c;triangles[n++]=d;}
         mesh.vertices=verts;mesh.uv=uv;mesh.triangles=triangles;mesh.RecalculateNormals();mesh.RecalculateBounds();
         return SaveMesh(mesh,name+".asset");
-    }
-
-    private Mesh BuildBicycleWheelAsset()
-    {
-        const int around=32,tube=8;const float radius=.39f,tubeRadius=.035f;Vector3[] vertices=new Vector3[around*tube];Vector2[] uv=new Vector2[vertices.Length];int[] triangles=new int[around*tube*6];
-        for(int i=0;i<around;i++)for(int j=0;j<tube;j++)
-        {
-            float a=i/(float)around*Mathf.PI*2f;float b=j/(float)tube*Mathf.PI*2f;
-            float r=radius+Mathf.Cos(b)*tubeRadius;vertices[i*tube+j]=new Vector3(Mathf.Cos(a)*r,Mathf.Sin(b)*tubeRadius,Mathf.Sin(a)*r);uv[i*tube+j]=new Vector2(i/(float)around,j/(float)tube);
-        }
-        int k=0;for(int i=0;i<around;i++)for(int j=0;j<tube;j++){int a=i*tube+j,b=i*tube+(j+1)%tube,c=((i+1)%around)*tube+j,d=((i+1)%around)*tube+(j+1)%tube;triangles[k++]=a;triangles[k++]=c;triangles[k++]=b;triangles[k++]=b;triangles[k++]=c;triangles[k++]=d;}
-        Mesh mesh=new Mesh{name="Bicycle Wheel"};mesh.vertices=vertices;mesh.uv=uv;mesh.triangles=triangles;mesh.RecalculateNormals();mesh.RecalculateBounds();
-        return SaveMesh(mesh,"BicycleWheel.asset");
     }
 
     private Mesh SaveMesh(Mesh generated,string fileName)

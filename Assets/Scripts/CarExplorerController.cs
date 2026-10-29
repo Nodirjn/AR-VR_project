@@ -113,6 +113,14 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
         public float Yaw, FromYaw, TargetYaw;
         public Vector3 YawPivot;
         public Vector3 FocusOffset;
+        // Some of its parts hang under another assembly's parts, so it cannot turn as a whole (GetFocusYaw).
+        public bool TurnBlocked;
+        // Its way between places (offsets; BuildPath) while it moves, and when on it it turns.
+        public Vector3[] Path;
+        public int PathCount;
+        public float PathLength, PathTurnStart, PathTurnEnd;
+        // The stretch of a move's time this node moves in (SetMoveWindows).
+        public float WindowStart, WindowEnd = 1f;
         public float FocusYaw;
         public Vector3 FocusPivot;
         public Vector3 ExplodeOffset;
@@ -330,6 +338,39 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
     private readonly List<Part> partBoxOwners = new List<Part>();
     private int placementStamp;
     private readonly Collider[] overlapBuffer = new Collider[128];
+    // The car's footprint and box in its own axes (MeasureFootprint) and its top seen from above (EnsureBodyHeights).
+    private float bodyCenterF, bodyHalfF, bodyCenterR, bodyHalfR;
+    private float footprintCenterF, footprintHalfF, footprintCenterR, footprintHalfR;
+    private float[] bodyHeights;
+    private int bodyCellsF, bodyCellsR;
+    private float bodyCellOriginF, bodyCellOriginR;
+    private readonly RaycastHit[] heightHits = new RaycastHit[128];
+    // An assembly's path while it is built (BuildPath); whether the move runs its kinds one after another.
+    private readonly List<Vector3> pathScratch = new List<Vector3>();
+    private bool windowedMotion;
+    // The view placement works for (PreparePlacementView): the camera's, or, while the desktop inspect camera is away
+    // from the body and flies back to it, the walking view it left (recorded every frame while it follows the body).
+    private bool placementFromWalk;
+    private Vector3 placementEye;
+    // Where the visitor's eye is now; placementEye is where it will be once a step back (planned in this command, or
+    // under way) is done, and then placementShifted is true (the view is then projected by hand, like the walking
+    // view). pendingStepBack: planned in this command, started with the move (BeginMotion).
+    private Vector3 placementBodyEye;
+    private bool placementShifted;
+    private Vector3 pendingStepBack;
+    private Quaternion placementRotation = Quaternion.identity;
+    private Quaternion placementInverse = Quaternion.identity;
+    private float placementTanX = 1f, placementTanY = 0.5f, placementNear = 0.05f;
+    private bool walkViewKnown;
+    private Camera walkCamera;
+    private Vector3 walkEye;
+    private Quaternion walkRotation = Quaternion.identity;
+    private float walkTanX = 1f, walkTanY = 0.5f, walkNear = 0.05f;
+    private bool inspectSeen;
+    private bool inspectReturnPending;
+    private float inspectReturnClock;
+    private Vector3 inspectReturnLocal;
+    private int inspectStillFrames;
     // The podium under the car (Circular Display), seen from above: the exploded view keeps the tagged assemblies on it.
     private bool hasPodium;
     private Vector2 podiumCenter;
@@ -343,22 +384,74 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
     private Vector2 pointerTravel;
     private Vector2 pointerPressPosition;
     private float pointerMaxTravel;
-    // Levels opened (or an assembly placed) while CarExplorerInspect.Active were placed for the inspect camera; once
-    // it is back on the walking body they are placed again for the walking eye (at replaceForWalkingAt).
-    private bool placedWhileInspecting;
-    private bool wasInspecting;
-    private float replaceForWalkingAt = -1f;
 
     private const float GhostFadeShadowsAt = 0.5f;
-    private const float FocusClearance = 0.4f;
-    // A taken-out assembly keeps this far (horizontally) from the viewer's eye: close enough to read, not in the face.
-    private const float FocusViewerClearance = 1.3f;
+    // A taken-out assembly comes to the visitor (ComputeFocusOffset): its centre comfortably this far ahead of the eye
+    // (horizontally; not nearer than FocusEyeDistanceMinXr in XR), as far as it needs to fill about FocusFill of the
+    // view's height and fit FocusFreeFit of the free view, further by up to FocusDistanceStretch; nearer, in
+    // FocusDistanceStep steps, down to the near limit: its box FocusNearClearance (FocusNearClearanceXr in XR) from the
+    // eye horizontally and at most FocusFillLimit of the view's height.
+    private const float FocusEyeDistanceMin = 1.4f;
+    private const float FocusEyeDistanceMinXr = 0.9f;
+    private const float FocusEyeDistanceMax = 2.6f;
+    private const float FocusDistanceStretch = 0.4f;
+    private const float FocusFill = 0.375f;
+    private const float FocusFreeFit = 0.9f;
+    private const float FocusDistanceStep = 0.15f;
+    // In XR the distances are tried in finer steps: a big assembly fits between a visitor and the car only within a
+    // few centimetres (the V6, 0.93 m deep, 1.5 m from the car's side: 0.82-0.89 m from the eye).
+    private const float FocusDistanceStepXr = 0.05f;
+    private const float FocusNearClearance = 0.5f;
+    private const float FocusNearClearanceXr = 0.35f;
+    private const float FocusFillLimit = 0.65f;
+    // At about chest height: its centre between these depths below the eye where the middle of the free view allows,
+    // its top at most FocusTopAboveEye over the eye; FocusLifts higher or lower when that is taken.
+    private const float FocusChestBelowEye = 0.75f;
+    private const float FocusTopAboveEye = 0.1f;
+    private static readonly float[] FocusLifts = { 0f, -0.15f, 0.15f, -0.3f, 0.3f };
+    // Its place lies on the horizontal line from the assembly to the eye; only when nothing there keeps the rules does
+    // it turn round the eye by these angles (either way). The costs: per degree of turn (more than any change of
+    // distance or height, so it comes toward the visitor instead of across the view), per metre nearer or further than
+    // the comfortable distance, per metre off the chest height.
+    private static readonly float[] FocusTurns =
+        { 0f, 3f, 6f, 10f, 14f, 18f, 23f, 29f, 36f, 44f, 53f, 63f, 74f, 86f, 98f, 112f, 128f, 146f, 165f, 180f };
+    private const float FocusTurnCost = 1f;
+    private const float FocusNearerCost = 0.4f;
+    private const float FocusFurtherCost = 1.2f;
+    private const float FocusLiftCost = 1f;
+    // The car's footprint (its rest bounds in its own axes, seen from above) grown by this much: a taken-out assembly,
+    // with every open level, ends outside it (over the roof or the bonnet counts as inside).
+    private const float FootprintMargin = 0.15f;
+    // Desktop framing: with no place keeping every rule for the visitor's eye, the walking body glides straight back
+    // from the car during the move (CarExplorerStepBack), the least number of StepBackStep steps up to StepBackMax
+    // that gives one.
+    private const float StepBackMax = 1.5f;
+    private const float StepBackStep = 0.15f;
+    // The car's top is sampled on a grid of this cell size (EnsureBodyHeights); a travelling assembly's bottom clears it
+    // by PathClearance, and its path's corners are rounded over PathCornerRadius (BuildPath).
+    private const float BodyCell = 0.1f;
+    private const float PathClearance = 0.12f;
+    private const float PathCornerRadius = 0.1f;
+    // A door or a wheel leaves its place sideways only when that keeps its box this far (horizontally) from the eye.
+    private const float PathViewerClearance = 0.35f;
+    // BuildPath checks the path it built at this many points and, where it runs into another part after leaving its
+    // place, raises the way over the car by PathRaiseStep, at most PathRaiseTries times.
+    private const int PathCheckSamples = 240;
+    private const float PathRaiseStep = 0.15f;
+    private const int PathRaiseTries = 3;
+    // Shares of transitionDuration: an assembly's travel on its path (each, when one goes home while another comes out),
+    // and a level's opening or closing before or after it (SetMoveWindows).
+    private const float MoveTravelWeight = 1f;
+    private const float MoveTravelSharedWeight = 0.75f;
+    private const float MoveLevelWeight = 0.2f;
+    // A taken-out assembly further than FocusEyeDistanceMax + FocusRefitSlack from the eye comes to the visitor again
+    // when a level opens or closes, and a new place is never more than FocusRefitFurther further from the eye than the
+    // one it has (RefitTakenOut).
+    private const float FocusRefitSlack = 1f;
+    private const float FocusRefitFurther = 1f;
+    // Back from the inspect camera: its flight to the body ends within this time (ReplaceForWalkingEye).
+    private const float InspectReturnTimeout = 2f;
     private const float FocusMaxHeight = 3.3f;
-    // Places computed while the inspect camera was the eye are computed again for the walking eye this long after
-    // inspecting ends: DesktopWalkthroughController's flight back (inspectFlightSeconds, 0.6 s) and a frame or two.
-    private const float InspectReturnSeconds = 0.7f;
-    // An opening level may move its taken-out assembly at most this much further from the eye (RefitTakenOut).
-    private const float RefitFurther = 1f;
     private const float ExplodeMaxHeight = 3.95f;
     // Parts stay this far above the floor or display (the display's LED ring stands 0.07 m proud).
     private const float FloorClearance = 0.09f;
@@ -373,6 +466,13 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
     // exploded view never more than PullTravelMax from where it was; it turns around the eye by these steps (either
     // way) to find room.
     private const float PullEyeDistance = 1.3f;
+    // In XR a level comes as near as the assembly does (FocusEyeDistanceMinXr) and keeps the XR clearance.
+    private const float PullEyeDistanceXr = 0.9f;
+    private const float PullViewerClearanceXr = 0.35f;
+    // In XR an opened assembly too big for the view so near backs toward the car by these steps, at most this far
+    // (KeepOutOfFootprint).
+    private const float FocusBackStep = 0.1f;
+    private const float FocusBackMax = 1.5f;
     private const float PullTravelMax = 2.5f;
     private static readonly float[] PullTurns = { 0f, 12f, 24f, 36f, 50f };
     // Nearer first, then further (a visitor looking up sees a level below the eye only further away).
@@ -383,9 +483,6 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
     // HUD leaves free on the desktop (CarExplorerModels.HudSafeViewport), the central 70 % of the field of view in XR.
     private const float ViewShareRequired = 0.85f;
     private static readonly Rect XrViewArea = new Rect(0.15f, 0.15f, 0.7f, 0.7f);
-    // Taken-out assemblies that cannot go their own way try every bearing round the car, at these heights.
-    private const int RingBearings = 16;
-    private static readonly float[] RingHeights = { 1.1f, 0.8f };
     private static readonly float[] GenericTurns = { 0f, 30f, -30f, 60f, -60f, 90f, -90f, 120f, -120f, 150f, -150f, 180f };
     // Tagged assemblies in the exploded view stay this far inside the podium's edge, on tiers this far apart.
     private const float PodiumInset = 0.2f;
@@ -692,6 +789,7 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
 
         // Leave no highlight, pointing gesture or voice behind while the explorer is off, and the car exactly as
         // authored: assembled, in its own materials, every renderer as found.
+        SetLowProxyShown(false);
         hovered = null;
         dimFocus = null;
         SelectNode(null, null);
@@ -736,8 +834,8 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
             NotifyChanged();
         }
 
+        TrackWalkingView();
         CompletePickScene();
-        UpdatePlacementAfterInspect();
         AnimateParts();
         UpdateGhosts();
         UpdateXRayLight();
@@ -1132,40 +1230,18 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
         }
         if (changed)
             AfterLevelsChanged();
-        SelectNode(select, clicked);
-    }
-
-    // See placedWhileInspecting: after the flight back, the taken-out assembly takes a new place when its place is
-    // no longer valid for the walking eye, and its open levels come toward that eye again.
-    private void UpdatePlacementAfterInspect()
-    {
-        bool inspecting = CarExplorerInspect.Active;
-        if (inspecting != wasInspecting)
+        else if (takenOut == assembly && view != CarExplorerView.Exploded && RefitTakenOut())
         {
-            wasInspecting = inspecting;
-            replaceForWalkingAt = !inspecting && placedWhileInspecting ? Time.time + InspectReturnSeconds : -1f;
-            if (!inspecting)
-                placedWhileInspecting = false;
+            // Clicked again from where the visitor now stands, out of view or behind the car: it comes to them.
+            foreach (Node node in openPath)
+                ComputePull(node);
+            foreach (Node node in openPath)
+                KeepSpreadInRoom(node);
+            KeepOutOfFootprint();
+            StartStateMove(false);
+            NotifyChanged();
         }
-        if (replaceForWalkingAt < 0f || Time.time < replaceForWalkingAt)
-            return;
-        replaceForWalkingAt = -1f;
-        if (takenOut == null || view == CarExplorerView.Exploded || viewCamera == null)
-            return;
-        Bounds spread = GetPlannedBounds(takenOut, false);
-        Bounds placed = RotateBounds(spread, takenOut.FocusYaw, takenOut.FocusPivot);
-        placed.center += takenOut.FocusOffset;
-        GatherFocusKeepOuts();
-        GatherPartBoxes(takenOut);
-        ScoreView(placed, viewCamera.transform.position, FocusMaxHeight, FocusViewerClearance, out bool valid);
-        if (!valid)
-            takenOut.FocusOffset = ComputeFocusOffset(takenOut, spread);
-        foreach (Node node in openPath)
-            ComputePull(node);
-        foreach (Node node in openPath)
-            KeepSpreadInRoom(node);
-        StartStateMove(false);
-        NotifyChanged();
+        SelectNode(select, clicked);
     }
 
     private void OpenLevel(Node node)
@@ -1184,6 +1260,7 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
                 ComputePull(node);
         foreach (Node node in openPath)
             KeepSpreadInRoom(node);
+        KeepOutOfFootprint();
         StartStateMove(false);
         NotifyChanged();
     }
@@ -1667,6 +1744,8 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
             pickParts.Add(part);
         }
         pickReady = pickParts.Count > 0;
+        // The car's top for the assemblies' paths, once, while everything is still at rest.
+        EnsureBodyHeights();
     }
 
     private void SyncPickColliders()
@@ -1810,7 +1889,7 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
     private static bool IsPartVisible(Part part)
     {
         foreach (Renderer renderer in part.Renderers)
-            if (renderer != null && renderer.enabled && !renderer.forceRenderingOff &&
+            if (renderer != null && renderer.enabled && (!renderer.forceRenderingOff || IsHiddenByLowProxy(renderer)) &&
                 renderer.gameObject.activeInHierarchy)
                 return true;
         return false;
@@ -2429,6 +2508,7 @@ public sealed partial class CarExplorerController : MonoBehaviour, ICarExplorerM
         UnregisterModel();
 
         StopVoice();
+        DestroyLowProxy();
         if (initialized)
         {
             SnapToRest();

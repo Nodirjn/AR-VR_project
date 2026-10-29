@@ -127,7 +127,8 @@ public static class CarExplorerHudStyle
     }
 
     /// <summary>
-    /// Small line icons drawn as distance fields: chevron (pointing right), close, explode, focus, dot, square.
+    /// Small line icons drawn as distance fields: chevron (pointing right), close, explode, focus, dot, square, tree
+    /// (an indented list), eye and eye-off.
     /// </summary>
     public static Sprite Icon(string name)
     {
@@ -192,6 +193,23 @@ public static class CarExplorerHudStyle
             }
             case "dot":
                 return new Vector2(u - 0.5f, v - 0.5f).magnitude - 0.3f;
+            case "tree":
+            {
+                // The STRUCTURE tab: a parent row and two indented child rows, each a dot and a line.
+                float d = Mathf.Min(Segment(u, v, 0.4f, 0.74f, 0.8f, 0.74f), Segment(u, v, 0.52f, 0.5f, 0.8f, 0.5f));
+                d = Mathf.Min(d, Segment(u, v, 0.52f, 0.26f, 0.8f, 0.26f)) - stroke;
+                d = Mathf.Min(d, new Vector2(u - 0.24f, v - 0.74f).magnitude - 0.07f);
+                d = Mathf.Min(d, new Vector2(u - 0.36f, v - 0.5f).magnitude - 0.07f);
+                return Mathf.Min(d, new Vector2(u - 0.36f, v - 0.26f).magnitude - 0.07f);
+            }
+            case "eye":
+                return EyeDistance(u, v);
+            case "eye-off":
+            {
+                // The eye, cut round a slash through it (the panels are hidden).
+                float slash = Segment(u, v, 0.2f, 0.2f, 0.8f, 0.8f);
+                return Mathf.Min(Mathf.Max(EyeDistance(u, v), 0.1f - slash), slash - stroke);
+            }
             case "square":
             {
                 float bx = Mathf.Abs(u - 0.5f) - 0.2f, by = Mathf.Abs(v - 0.5f) - 0.2f;
@@ -201,6 +219,15 @@ public static class CarExplorerHudStyle
             default:
                 return 1f;
         }
+    }
+
+    // An eye: the outline of a lens (two circles' intersection, 0.68 wide and 0.4 high) round a round pupil.
+    private static float EyeDistance(float u, float v)
+    {
+        const float radius = 0.389f, offset = 0.189f;
+        float lens = Mathf.Max(new Vector2(u - 0.5f, v - 0.5f + offset).magnitude - radius,
+            new Vector2(u - 0.5f, v - 0.5f - offset).magnitude - radius);
+        return Mathf.Min(Mathf.Abs(lens) - 0.05f, new Vector2(u - 0.5f, v - 0.5f).magnitude - 0.09f);
     }
 
     // Signed distance to an axis-aligned box, from the point's distances past the box's half extents on each axis.

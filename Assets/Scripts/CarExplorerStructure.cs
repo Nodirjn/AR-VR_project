@@ -685,6 +685,7 @@ public sealed partial class CarExplorerController
         Vector3 forward = Vector3.ProjectOnPlane(front - carRestCenter, Vector3.up);
         carForward = forward.sqrMagnitude > 0.0001f ? forward.normalized : Vector3.forward;
         carRight = Vector3.Cross(Vector3.up, carForward).normalized;
+        MeasureFootprint();
 
         root = NewNode(null, CarNodeKind.Vehicle, "Aurelle CarConcept", "Aurelle CarConcept",
             "Concept car with a supercharged V6: body, structure, cabin, wheels and powertrain.",

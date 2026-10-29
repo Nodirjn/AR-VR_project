@@ -228,11 +228,12 @@ namespace CarInternals
                     float x0 = -halfW + halfW * 2f * i / ridges, x1 = -halfW + halfW * 2f * (i + 0.5f) / ridges, x2 = -halfW + halfW * 2f * (i + 1f) / ridges;
                     float zin = z - zSign * 0.0016f;
                     Vector3 n0 = new Vector3(-0.6f, 0f, zSign).normalized, n1 = new Vector3(0.6f, 0f, zSign).normalized;
-                    int a = k.Vertex(new Vector3(x0, -halfH, z), n0, Vector2.zero), b = k.Vertex(new Vector3(x1, -halfH, zin), n0, Vector2.zero);
-                    int c = k.Vertex(new Vector3(x1, halfH, zin), n0, Vector2.zero), d = k.Vertex(new Vector3(x0, halfH, z), n0, Vector2.zero);
+                    // planar UVs in metres across the core face (the fin texture's passages run along v)
+                    int a = k.Vertex(new Vector3(x0, -halfH, z), n0, new Vector2(x0, -halfH)), b = k.Vertex(new Vector3(x1, -halfH, zin), n0, new Vector2(x1, -halfH));
+                    int c = k.Vertex(new Vector3(x1, halfH, zin), n0, new Vector2(x1, halfH)), d = k.Vertex(new Vector3(x0, halfH, z), n0, new Vector2(x0, halfH));
                     k.Quad(a, b, c, d);
-                    a = k.Vertex(new Vector3(x1, -halfH, zin), n1, Vector2.zero); b = k.Vertex(new Vector3(x2, -halfH, z), n1, Vector2.zero);
-                    c = k.Vertex(new Vector3(x2, halfH, z), n1, Vector2.zero); d = k.Vertex(new Vector3(x1, halfH, zin), n1, Vector2.zero);
+                    a = k.Vertex(new Vector3(x1, -halfH, zin), n1, new Vector2(x1, -halfH)); b = k.Vertex(new Vector3(x2, -halfH, z), n1, new Vector2(x2, -halfH));
+                    c = k.Vertex(new Vector3(x2, halfH, z), n1, new Vector2(x2, halfH)); d = k.Vertex(new Vector3(x1, halfH, zin), n1, new Vector2(x1, halfH));
                     k.Quad(a, b, c, d);
                 }
             }
@@ -329,8 +330,8 @@ namespace CarInternals
                     Vector2 o0 = d0 * Mathf.Min(hx / Mathf.Max(1e-4f, Mathf.Abs(d0.x)), hy / Mathf.Max(1e-4f, Mathf.Abs(d0.y)));
                     Vector2 o1 = d1 * Mathf.Min(hx / Mathf.Max(1e-4f, Mathf.Abs(d1.x)), hy / Mathf.Max(1e-4f, Mathf.Abs(d1.y)));
                     Vector3 n = new Vector3(0f, 0f, s);
-                    int a = k.Vertex(new Vector3(d0.x * r, d0.y * r, z), n, Vector2.zero), b = k.Vertex(new Vector3(d1.x * r, d1.y * r, z), n, Vector2.zero);
-                    int c = k.Vertex(new Vector3(o1.x, o1.y, z), n, Vector2.zero), d = k.Vertex(new Vector3(o0.x, o0.y, z), n, Vector2.zero);
+                    int a = k.Vertex(new Vector3(d0.x * r, d0.y * r, z), n, d0 * r), b = k.Vertex(new Vector3(d1.x * r, d1.y * r, z), n, d1 * r);
+                    int c = k.Vertex(new Vector3(o1.x, o1.y, z), n, o1), d = k.Vertex(new Vector3(o0.x, o0.y, z), n, o0);
                     k.Quad(a, b, c, d);
                 }
             }

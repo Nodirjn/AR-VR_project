@@ -16,6 +16,10 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
     // Legs: how far each knee turns out from straight ahead (share of the bike's width axis), the ball joint's height above the
     // sole as a share of the foot's length, and the foot's toe-down pitch (degrees) at the top and the bottom of the stroke.
     private const float KneeOut = 0.15f, SoleShare = 0.1f, ToeDownTop = 2f, ToeDownBottom = 18f;
+    // Drivetrain: the chain runs on the 38-tooth chainring and the 21-tooth cog, so the cranks turn 21/38 of a wheel turn.
+    // While the bike slows down the rider freewheels: the cranks stop, then come level (pedals at 3 and 9 o'clock) at most
+    // this fast (degrees per second).
+    private const float CrankPerWheelTurn = 21f / 38f, CoastLevelRate = 90f;
     [SerializeField] private Transform[] route;
     [SerializeField] private ExteriorTrafficSignal[] signals;
     [SerializeField, Min(1f)] private float speed = 5f;
@@ -29,7 +33,7 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
     private Quaternion frontWheelRest, rearWheelRest;
     private int targetIndex;
     private bool hasStartIndex, riderPosed;
-    private float phase, currentSpeed, waitTime, ignoreStoppedCarsUntil, wheelAngle, wheelRadius = 0.4f;
+    private float crankAngle, currentSpeed, waitTime, ignoreStoppedCarsUntil, wheelAngle, wheelRadius = 0.4f;
     private Vector3 heading = Vector3.forward;
 
     internal Vector3 Heading => heading;
@@ -63,6 +67,16 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
     {
         route = path; speed = rideSpeed; currentSpeed = rideSpeed; rider = riderRoot; leftCrank = leftPedal; rightCrank = rightPedal;
         signals = trafficSignals;
+        PoseRider();
+    }
+
+    /// <summary>Editor tools: binds the cranks of a rebuilt bicycle (crank angle back to 0, left pedal up) and seats the rider
+    /// on it again.</summary>
+    internal void Rebind(Transform leftPedal, Transform rightPedal)
+    {
+        leftCrank = leftPedal;
+        rightCrank = rightPedal;
+        crankAngle = 0f;
         PoseRider();
     }
 
@@ -111,21 +125,24 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
             waitTime = 0f;
         }
         limit = Mathf.Min(limit, trafficLimit);
-        currentSpeed = limit < currentSpeed ? Mathf.Max(limit, currentSpeed - 2f * acceleration * dt) : Mathf.Min(limit, currentSpeed + acceleration * dt);
+        bool slowing = limit < currentSpeed;
+        currentSpeed = slowing ? Mathf.Max(limit, currentSpeed - 2f * acceleration * dt) : Mathf.Min(limit, currentSpeed + acceleration * dt);
         transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(direction, Vector3.up), 4f * dt);
         float travelled = currentSpeed * dt;
         transform.position += direction * travelled;
         KeepTyresOnSurface(dt);
-        phase = Mathf.Repeat(phase + dt * 9f * currentSpeed / speed, 2f * Mathf.PI);
-        // The cranks turn about the bottom-bracket axle (each pivot's local X) with the pedalling phase, and the wheels roll
-        // about theirs by the distance covered, so both stop with the bike; the feet stay on the pedals.
-        float crank = phase * Mathf.Rad2Deg;
-        TurnCranks(crank);
-        wheelAngle = Mathf.Repeat(wheelAngle + travelled / wheelRadius * Mathf.Rad2Deg, 360f);
+        // The wheels roll about their axles (the bike's X axis) by the distance covered: angle = distance / tyre radius, the
+        // top of each wheel moving forward. While the rider pedals, the cranks turn about the bottom-bracket axle with the rear
+        // wheel through the gear; while the bike slows down they freewheel and come level. The feet stay on the pedals.
+        float roll = travelled / wheelRadius * Mathf.Rad2Deg;
+        wheelAngle = Mathf.Repeat(wheelAngle + roll, 360f);
         if (frontWheel != null) frontWheel.localRotation = Quaternion.AngleAxis(wheelAngle, Vector3.right) * frontWheelRest;
         if (rearWheel != null) rearWheel.localRotation = Quaternion.AngleAxis(wheelAngle, Vector3.right) * rearWheelRest;
-        Pedal(leftLeg, crank);
-        Pedal(rightLeg, crank + 180f);
+        if (!slowing && currentSpeed > 0.05f) crankAngle = Mathf.Repeat(crankAngle + roll * CrankPerWheelTurn, 360f);
+        else crankAngle = Mathf.Repeat(Mathf.MoveTowardsAngle(crankAngle, Mathf.Repeat(crankAngle, 360f) < 180f ? 90f : 270f, CoastLevelRate * dt), 360f);
+        TurnCranks(crankAngle);
+        Pedal(leftLeg, crankAngle);
+        Pedal(rightLeg, crankAngle + 180f);
     }
 
     private void TurnCranks(float crank)
@@ -207,10 +224,9 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
             skin.localBounds = new Bounds(Vector3.zero, Vector3.one * (2f / Mathf.Max(0.0001f, bone.lossyScale.x)));
         }
         riderPosed = true;
-        float crank = phase * Mathf.Rad2Deg;
-        TurnCranks(crank);
-        Pedal(leftLeg, crank);
-        Pedal(rightLeg, crank + 180f);
+        TurnCranks(crankAngle);
+        Pedal(leftLeg, crankAngle);
+        Pedal(rightLeg, crankAngle + 180f);
     }
 
     private Transform Bone(Animator human, HumanBodyBones bone, string mixamoName)
@@ -273,14 +289,18 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
         return roll;
     }
 
-    // Moves the whole rider so the Hips bone sits SeatLift above the middle of the saddle's top, read from the saddle's renderer bounds.
+    // Moves the whole rider so the Hips bone sits SeatLift above the saddle's Sit Point (over the sit bones), or, on a saddle
+    // without one, above the middle of its top read from the renderer bounds.
     private void SitOnSaddle(Transform hips)
     {
         Transform saddle = transform.Find("Bicycle/Saddle");
-        Renderer seat = saddle != null ? saddle.GetComponent<Renderer>() : null;
-        if (hips == null || seat == null) return;
-        Bounds bounds = seat.bounds;
-        rider.position += new Vector3(bounds.center.x, bounds.max.y, bounds.center.z) + transform.up * SeatLift - hips.position;
+        if (hips == null || saddle == null) return;
+        Transform sit = saddle.Find("Sit Point");
+        Renderer seat = saddle.GetComponent<Renderer>();
+        if (sit == null && seat == null) return;
+        Bounds bounds = seat != null ? seat.bounds : default;
+        Vector3 top = sit != null ? sit.position : new Vector3(bounds.center.x, bounds.max.y, bounds.center.z);
+        rider.position += top + transform.up * SeatLift - hips.position;
     }
 
     // Leans the torso about the lowest spine joint: the spine-to-neck line tilts forward of the bike's vertical by the least angle
@@ -384,11 +404,17 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
         return tip;
     }
 
-    // The grip is read from the handlebar the generator built: GripSpan of the way from the centre of its mesh to the end of
-    // its longest axis on this side.
+    // The grip is the handlebar's Left Grip or Right Grip anchor; on a handlebar without them, GripSpan of the way from the
+    // centre of its mesh to the end of its longest axis on this side.
     private bool TryGetGrip(Transform handlebar, float side, out Vector3 grip)
     {
         grip = Vector3.zero;
+        Transform anchor = handlebar != null ? handlebar.Find(side < 0f ? "Left Grip" : "Right Grip") : null;
+        if (anchor != null)
+        {
+            grip = anchor.position;
+            return true;
+        }
         MeshFilter filter = handlebar != null ? handlebar.GetComponent<MeshFilter>() : null;
         if (filter == null || filter.sharedMesh == null) return false;
         Bounds bounds = filter.sharedMesh.bounds;
@@ -405,7 +431,7 @@ public sealed class ExteriorCyclistAgent : MonoBehaviour
         return true;
     }
 
-    // Wheels roll about their axles (the bike's X axis); the rolling radius is the axle height above the ground.
+    // Wheels roll about their axles (the bike's X axis); the rolling radius is the tyre's outer radius (else the axle height).
     private void CacheWheels()
     {
         frontWheel = transform.Find("Bicycle/Front Alloy Wheel");

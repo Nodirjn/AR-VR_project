@@ -101,6 +101,11 @@ public sealed partial class CarExplorerController
                 }
         }
         motionTracks.Sort((a, b) => GetTransformDepth(a.Node).CompareTo(GetTransformDepth(b.Node)));
+        // A part hung under another assembly's part moves with its own assembly but cannot turn with it (only an
+        // assembly's top parts turn): such an assembly keeps its heading when it comes out (GetFocusYaw).
+        foreach (MotionTrack track in motionTracks)
+            if (track.Assembly != null && track.ParentTrack != null && track.ParentTrack.Assembly != track.Assembly)
+                track.Assembly.TurnBlocked = true;
     }
 
     // ---------------------------------------------------------------- moves
@@ -204,9 +209,12 @@ public sealed partial class CarExplorerController
             else if (node.Spreading) spread = true;
             else close = true;
         }
-        // An assembly travels first and comes apart on the way; coming back, it closes first and then travels home.
-        // A level that closes while another opens closes first. A single kind of move takes the whole time.
+        // In the exploded view's staggered moves an assembly travels first and comes apart on the way; coming back,
+        // it closes first and then travels home. Every other move runs its kinds one after another (SetMoveWindows).
         phasedMotion = (travel && (spread || close)) || (spread && close);
+        windowedMotion = !staggered;
+        if (windowedMotion)
+            duration = SetMoveWindows(duration);
 
         movingTracks.Clear();
         foreach (MotionTrack track in motionTracks)
@@ -225,11 +233,75 @@ public sealed partial class CarExplorerController
                 movingTracks.Add(track);
         }
         transitionLength = Mathf.Max(0.1f, duration);
+        StartPendingStepBack();
         transitionSpan = Mathf.Max(0.3f, transitionLength - maxDelay);
         transitionClock = 0f;
         transitionT = movingNodes.Count > 0 || movingTracks.Count > 0 ? 0f : 1f;
         if (transitionT >= 1f)
             FinishTransition();
+    }
+
+    // Outside the exploded view's staggered moves, the kinds of move run one after another, each in its own stretch of
+    // the time: open levels close, an assembly goes home, an assembly comes out (or moves to a new place), levels
+    // open; so an assembly travels closed and its levels never sweep through the car. An assembly that travels gets
+    // its path (BuildPath) and MoveTravelWeight of the move's duration (MoveTravelSharedWeight each when one goes home
+    // while another comes out), a level move MoveLevelWeight; a move of levels alone keeps the duration. Returns the
+    // move's length.
+    private float SetMoveWindows(float duration)
+    {
+        bool closing = false, home = false, outward = false, opening = false, path = false;
+        foreach (Node node in movingNodes)
+        {
+            node.WindowStart = 0f;
+            node.WindowEnd = 1f;
+            if (node == node.Assembly)
+            {
+                BuildPath(node);
+                path |= node.PathCount > 0;
+                if (node.Target == Vector3.zero && node.TargetYaw == 0f)
+                    home = true;
+                else
+                    outward = true;
+            }
+            else if (node.Spreading)
+                opening = true;
+            else
+                closing = true;
+        }
+        if (!home && !outward)
+        {
+            if (!(closing && opening))
+                return duration;
+        }
+        float travel = home && outward ? MoveTravelSharedWeight : path ? MoveTravelWeight : 1f;
+        float level = home || outward ? MoveLevelWeight : 0.5f;
+        float closeEnd = closing ? level : 0f;
+        float homeEnd = closeEnd + (home ? travel : 0f);
+        float outEnd = homeEnd + (outward ? travel : 0f);
+        float total = outEnd + (opening ? level : 0f);
+        foreach (Node node in movingNodes)
+        {
+            float start, end;
+            if (node == node.Assembly)
+            {
+                bool goingHome = node.Target == Vector3.zero && node.TargetYaw == 0f;
+                start = goingHome ? closeEnd : homeEnd;
+                end = goingHome ? homeEnd : outEnd;
+            }
+            else if (node.Spreading)
+            {
+                start = outEnd;
+                end = total;
+            }
+            else
+            {
+                start = 0f;
+                end = closeEnd;
+            }
+            node.WindowStart = start / total;
+            node.WindowEnd = Mathf.Max(node.WindowStart + 1e-3f, end / total);
+        }
+        return duration * total;
     }
 
     // node.World: the node's offset plus its parents' (the vehicle and the systems never move).
@@ -281,12 +353,22 @@ public sealed partial class CarExplorerController
         {
             float local = Mathf.Clamp01((transitionClock - node.Delay) / transitionSpan);
             float amount = Smooth(local);
-            if (phasedMotion)
+            if (windowedMotion)
+                amount = Smooth(Mathf.Clamp01((local - node.WindowStart) /
+                                              Mathf.Max(1e-4f, node.WindowEnd - node.WindowStart)));
+            else if (phasedMotion)
             {
                 float first = Smooth(Mathf.Clamp01(local / FirstPhaseShare));
                 float second = Smooth(Mathf.Clamp01((local - SecondPhaseStart) / (1f - SecondPhaseStart)));
                 bool isAssembly = node == node.Assembly;
                 amount = isAssembly == node.Spreading ? first : second;
+            }
+            if (node.PathCount > 0)
+            {
+                // A taken-out assembly's path: out of its place, over the car and down (BuildPath).
+                node.Offset = EvaluatePath(node, amount);
+                node.Yaw = Mathf.LerpUnclamped(node.FromYaw, node.TargetYaw, GetPathTurn(node, amount));
+                continue;
             }
             node.Offset = Vector3.LerpUnclamped(node.From, node.Target, amount);
             if (node == node.Assembly)
@@ -314,6 +396,7 @@ public sealed partial class CarExplorerController
             node.Offset = node.Target;
             node.Yaw = node.TargetYaw;
             node.Moving = false;
+            node.PathCount = 0;
         }
         UpdateWorldOffsets();
         foreach (MotionTrack track in movingTracks)
@@ -363,6 +446,7 @@ public sealed partial class CarExplorerController
             node.Offset = node.From = node.Target = node.World = Vector3.zero;
             node.Yaw = node.FromYaw = node.TargetYaw = 0f;
             node.Moving = false;
+            node.PathCount = 0;
         }
         foreach (MotionTrack track in motionTracks)
         {
@@ -477,16 +561,19 @@ public sealed partial class CarExplorerController
     // the eye, in view,
     // and clear of every other drawn part, of the viewer, the room and the keep-outs. Where that place is taken (or out
     // of view) it comes a little nearer, a little higher or lower, a little further, then turns round the eye in steps,
-    // first toward the middle of the view. Each deeper level comes out the same way, beside the one before.
+    // first toward the middle of the view. Each deeper level comes out the same way, beside the one before. The
+    // taken-out assembly already stands in front of the visitor (ComputeFocusOffset), so its levels come out on the
+    // same line, a little nearer, never across the car. While the desktop inspect camera orbits, the eye is the
+    // walking eye it left (PreparePlacementView).
     private void ComputePull(Node node)
     {
-        placedWhileInspecting |= CarExplorerInspect.Active;
         node.PullOffset = Vector3.zero;
         Node assembly = node.Assembly;
         if (assembly == null || node == assembly || viewCamera == null)
             return;
+        PreparePlacementView();
         Bounds own = GetPlannedBounds(node, true);
-        Vector3 eye = viewCamera.transform.position;
+        Vector3 eye = placementEye;
         GatherFocusKeepOuts();
         GatherPartBoxes(node);
         float ceiling = view == CarExplorerView.Exploded ? ExplodeMaxHeight : FocusMaxHeight;
@@ -495,17 +582,21 @@ public sealed partial class CarExplorerController
         float highest = Mathf.Max(lowest, eye.y - BelowEye);
         Vector3 toLevel = Vector3.ProjectOnPlane(own.center - eye, Vector3.up);
         float distanceNow = toLevel.magnitude;
-        Vector3 look = Vector3.ProjectOnPlane(viewCamera.transform.forward, Vector3.up);
+        Vector3 look = Vector3.ProjectOnPlane(placementRotation * Vector3.forward, Vector3.up);
         Vector3 bearing = distanceNow > 0.01f ? toLevel / distanceNow
             : look.sqrMagnitude > 0.0001f ? look.normalized : carForward;
         float toward = look.sqrMagnitude > 0.0001f && Vector3.SignedAngle(bearing, look, Vector3.up) < 0f ? -1f : 1f;
         float halfWidth = Mathf.Max(own.extents.x, own.extents.z);
-        float nearest = PullViewerClearance + halfWidth + 0.05f;
-        float reach = Mathf.Max(PullEyeDistance, nearest + 0.15f, own.extents.magnitude * 3.2f);
+        bool xr = IsXrView();
+        float pullClearance = xr ? PullViewerClearanceXr : PullViewerClearance;
+        float nearest = pullClearance + halfWidth + 0.05f;
+        float reach = Mathf.Max(xr ? PullEyeDistanceXr : PullEyeDistance, nearest + 0.15f, own.extents.magnitude * 3.2f);
         // In the exploded view the level stays near its assembly; a taken-out assembly's comes to the visitor.
         if (view == CarExplorerView.Exploded)
             reach = Mathf.Max(reach, distanceNow - PullTravelMax);
         float baseHeight = Mathf.Clamp(own.center.y, lowest, highest);
+        // A taken-out assembly's level stays out of the car and in sight past it, like the assembly.
+        bool outside = view != CarExplorerView.Exploded && assembly == takenOut;
         Vector3 best = Vector3.zero;
         float bestScore = float.NegativeInfinity;
         for (int t = 0; t < PullTurns.Length * 2 - 1; t++)
@@ -526,8 +617,13 @@ public sealed partial class CarExplorerController
                     center.y = height;
                     Bounds moved = own;
                     moved.center = center;
-                    float score = ScoreView(moved, eye, ceiling, PullViewerClearance, out bool valid) -
+                    float score = ScoreView(moved, eye, ceiling, pullClearance, out bool valid) -
                                   0.3f * t - 0.2f * n - 0.1f * h;
+                    if (outside && (!IsOutsideFootprint(moved) || !SeesPastCar(moved.center)))
+                    {
+                        valid = false;
+                        score -= 200f;
+                    }
                     if (valid)
                     {
                         node.PullOffset = center - own.center;
@@ -615,121 +711,253 @@ public sealed partial class CarExplorerController
 
     // ---------------------------------------------------------------- taking an assembly out
 
-    // Where a clicked assembly goes: out of the car in its own direction (a door or wheel to its side, the V6
-    // forward) at a comfortable height, or up above the car (the front and rear sections like a raised hood, the
-    // cabin assemblies, the roof, the windscreen), with its centre BelowEye under the eye at most - the first of these
-    // that is clear of the viewer, the room, the other display cars and the rest of the car, and in view (ScoreView).
-    // When none is, it goes out of the car toward any bearing round it, at a comfortable height: the free place in
-    // view nearest the middle of the view wins. `spread` is the assembly's box with its open levels, as if it stood in
-    // the car. Places whose centre is further than maxDistance from the eye are not tried (RefitTakenOut keeps an
-    // opening assembly near the visitor).
-    private Vector3 ComputeFocusOffset(Node assembly, Bounds spread, float maxDistance = float.PositiveInfinity)
+    // Where a clicked assembly goes, the same rule for every assembly: out of the car, toward the visitor. Its place is
+    // looked for on the horizontal line from where it is (its rest centre in the car; where it stands, when it comes
+    // again) to the eye, so on screen it comes toward the visitor instead of sliding across the view; only when nothing
+    // on that line will do does it turn round the eye, as little as it can (FindVisitorPlace). The hard rules: its box
+    // (with every open level) ends outside the car's footprint (IsOutsideFootprint: hovering over the roof or the bonnet
+    // counts as inside), the car's box never stands between the eye and its centre (SeesPastCar), its bottom stays off
+    // the floor and its box FocusNearClearance (horizontally) from the eye and under FocusFillLimit of the view's
+    // height. Then it should be in view (ViewShareRequired of its screen box in the free part of the view:
+    // CarExplorerModels.HudSafeViewport on the desktop, XrViewArea in XR) and clear of Remy, the other display cars,
+    // furniture and walls. Among those, the turn costs most (FocusTurnCost per degree), then coming nearer or going
+    // further than the comfortable distance (about FocusFill of the view's height, FocusEyeDistanceMin..Max from the
+    // eye; FocusEyeDistanceMinXr in XR), then the height off the chest band (FocusChestBelowEye..BelowEye under the
+    // eye). While the desktop inspect camera orbits, the visitor is the walking eye it left (PreparePlacementView).
+    // `spread` is the assembly's box with its open levels, as if it stood in the car; `from` is where it is now
+    // (null: in the car).
+    private Vector3 ComputeFocusOffset(Node assembly, Bounds spread, Vector3? from = null,
+        float maxDistance = float.PositiveInfinity)
     {
-        placedWhileInspecting |= CarExplorerInspect.Active;
-        Vector3 viewer = viewCamera != null ? viewCamera.transform.position : carRestCenter + carForward * 6f;
+        PreparePlacementView();
+        EnsureBodyHeights();
+        Vector3 viewer = placementEye;
         assembly.FocusPivot = assembly.RestBounds.center;
         assembly.FocusYaw = GetFocusYaw(assembly, assembly.FocusPivot, viewer);
         if (!assembly.Relocates)
             return Vector3.zero;
         spread = RotateBounds(spread, assembly.FocusYaw, assembly.FocusPivot);
         GatherFocusKeepOuts();
-        GatherPartBoxes(assembly);
-
-        Vector3 best = Vector3.zero;
-        float bestScore = float.NegativeInfinity;
-        for (int candidate = 0; candidate < 3; candidate++)
-        {
-            Vector3 offset = GetOwnFocusOffset(assembly, spread, candidate, viewer);
-            Bounds target = spread;
-            target.center += offset;
-            if (Vector3.Distance(viewer, target.center) > maxDistance)
-                continue;
-            float score = ScoreView(target, viewer, FocusMaxHeight, FocusViewerClearance, out bool valid) -
-                          candidate * 0.1f;
-            if (valid)
-                return offset;
-            if (score > bestScore)
-            {
-                bestScore = score;
-                best = offset;
-            }
-        }
-        bool found = false;
-        for (int bearing = 0; bearing < RingBearings; bearing++)
-        {
-            Vector3 direction = Quaternion.AngleAxis(360f * bearing / RingBearings, Vector3.up) * carForward;
-            for (int level = 0; level < RingHeights.Length; level++)
-            {
-                Vector3 offset = OutOfCar(spread, direction, RingHeights[level]);
-                Bounds target = spread;
-                target.center += offset;
-                // In view, then nearest the middle of the view and not far beyond reading distance.
-                float distance = Vector3.Distance(viewer, target.center);
-                if (distance > maxDistance)
-                    continue;
-                float score = ScoreView(target, viewer, FocusMaxHeight, FocusViewerClearance, out bool valid) -
-                              10f * GetViewOffCentre(target) - 4f * Mathf.Max(0f, distance - 3f) -
-                              0.2f * level - 1f;
-                if (valid)
-                    score += 1000f;
-                if (score > bestScore && (valid || !found))
-                {
-                    found |= valid;
-                    bestScore = score;
-                    best = offset;
-                }
-            }
-        }
-        return best;
+        Vector3 source = from ?? spread.center;
+        Vector3 place = FindVisitorPlace(spread, source, maxDistance, out int tier);
+        if (tier > 0 && TryStepBack(spread, source, maxDistance, out Vector3 stepped))
+            place = stepped;
+        return place - spread.center;
     }
 
-    // An assembly's own ways out, in order. Places above the car stay below the eye and slide out along the
-    // assembly's way until they are clear of the rest of the car.
-    private Vector3 GetOwnFocusOffset(Node assembly, Bounds spread, int candidate, Vector3 viewer)
+    // Desktop framing: when no place keeps every rule for the visitor's eye, the walking body may glide straight back
+    // from the car (along the line from the car's centre through the eye, keeping its yaw and pitch) during the move,
+    // to the nearest eye (StepBackStep apart, up to StepBackMax, as far as the body can go without running into
+    // anything) from which one exists; the assembly is placed for that eye (it may end where the visitor stood: they
+    // glide away while it comes, and its path keeps clear of both eyes, BuildPath). Never in XR, while inspecting or
+    // back from it; without such an eye (a wall behind) nothing glides and the place found for the eye as it is
+    // stands.
+    private bool TryStepBack(Bounds spread, Vector3 source, float maxDistance, out Vector3 place)
     {
-        Vector3 outward = carRight * assembly.Side;
-        Vector3 away = Vector3.ProjectOnPlane(spread.center - carRestCenter, Vector3.up);
-        away = away.sqrMagnitude > 0.01f ? away.normalized : carForward;
-        Vector3 toViewer = GetSideTowardViewer(viewer);
-        switch (assembly.Kind)
+        place = default;
+        ICarExplorerStepBackBody stepBody = CarExplorerStepBack.Body;
+        if (stepBody == null || !stepBody.CanStepBack || IsXrView() || placementFromWalk || viewCamera == null ||
+            CarExplorerInspect.Active)
+            return false;
+        Vector3 away = Vector3.ProjectOnPlane(placementEye - carRestCenter, Vector3.up);
+        if (away.sqrMagnitude < 0.01f)
+            return false;
+        away.Normalize();
+        Vector3 eye = placementEye;
+        bool shifted = placementShifted;
+        // From where the body will be (with a glide under way, from its end).
+        float already = Mathf.Max(0f, Vector3.Dot(eye - placementBodyEye, away));
+        float reach = stepBody.GetStepBackReach(away, StepBackMax + already) - already;
+        float step = 0f;
+        for (int n = 1; n * StepBackStep <= Mathf.Min(reach, StepBackMax) + 0.001f; n++)
         {
-            case AssemblyKind.Wheel:
-                return candidate == 0 ? OutOfCar(spread, outward, 0.95f)
-                    : candidate == 1 ? OutOfCar(spread, outward, 0.95f) * 0.75f + Vector3.up * 0.25f
-                    : AboveCarClear(spread, 0.25f, Vector3.zero, outward, viewer);
-            case AssemblyKind.Door:
-                return candidate == 0 ? OutOfCar(spread, outward, 1.15f)
-                    : candidate == 1 ? AboveCarClear(spread, 0.25f, Vector3.zero, outward, viewer)
-                    : OutOfCar(spread, outward, 1.6f);
-            // The front and rear sections lift off like a raised hood or tailgate, so the bay stays in view; else
-            // they go out of the car on their own end, or that end and aside from the viewer.
-            case AssemblyKind.Front:
-                return candidate == 0 ? AboveCarClear(spread, 0.3f, carForward * 0.25f, carForward, viewer)
-                    : candidate == 1 ? OutOfCar(spread, carForward, 1.15f)
-                    : OutOfCar(spread, carForward, 1.15f) - toViewer * 1.2f;
-            case AssemblyKind.Rear:
-                return candidate == 0 ? AboveCarClear(spread, 0.3f, -carForward * 0.25f, -carForward, viewer)
-                    : candidate == 1 ? OutOfCar(spread, -carForward, 1.15f)
-                    : OutOfCar(spread, -carForward, 1.15f) - toViewer * 1.2f;
-            // Forward out of the bay; for a viewer standing in front, forward and aside from them; else lifted out
-            // of the bay and forward.
-            case AssemblyKind.Engine:
-                return candidate == 0 ? OutOfCar(spread, carForward, 1.2f)
-                    : candidate == 1 ? OutOfCar(spread, carForward, 1.2f) - toViewer * 1.1f
-                    : AboveCarClear(spread, 0.2f, Vector3.zero, carForward, viewer);
-            case AssemblyKind.Windscreen:
-                return AboveCarClear(spread, 0.25f, carForward * (candidate == 0 ? 0.35f : candidate == 1 ? 0f : -0.3f),
-                    candidate == 2 ? -carForward : carForward, viewer);
-            case AssemblyKind.Generic:
-                // Tagged and unknown assemblies: out of the car on their own side, a little aside from a viewer
-                // standing there, else above the car.
-                return candidate == 0 ? OutOfCar(spread, away, 1.1f)
-                    : candidate == 1 ? OutOfCar(spread, away, 1.1f) - toViewer * 0.9f
-                    : AboveCarClear(spread, 0.25f, Vector3.zero, away, viewer);
-            default:
-                // Roof, body frame, seats, cockpit: straight up out of the car, then out toward the viewer's side.
-                return AboveCarClear(spread, 0.25f + 0.3f * candidate, Vector3.zero, toViewer, viewer);
+            placementEye = eye + away * (n * StepBackStep);
+            placementShifted = true;
+            Vector3 candidate = FindVisitorPlace(spread, source, maxDistance, out int tier);
+            if (tier == 0)
+            {
+                place = candidate;
+                step = n * StepBackStep;
+                break;
+            }
         }
+        placementEye = eye;
+        placementShifted = shifted;
+        if (step <= 0f)
+            return false;
+        pendingStepBack += away * step;
+        placementEye = eye + away * step;
+        placementShifted = true;
+        return true;
+    }
+
+    // The step back planned for this command starts with its move and lasts as long (the rest of one under way
+    // included); the body ends it when the visitor takes over.
+    private void StartPendingStepBack()
+    {
+        if (pendingStepBack.sqrMagnitude < 1e-6f)
+            return;
+        ICarExplorerStepBackBody stepBody = CarExplorerStepBack.Body;
+        if (stepBody != null && stepBody.CanStepBack && !IsXrView())
+            stepBody.StepBack(pendingStepBack + stepBody.StepBackRemaining, transitionLength);
+        pendingStepBack = Vector3.zero;
+    }
+
+
+    // A place tried for a taken-out assembly: its centre, its tier (0: every rule kept; 1: in view but bigger than
+    // FocusFillLimit; 2: out of view; 3: in Remy's, a car's, a wall's or furniture's way; 4: only outside the car and
+    // seen past it) and what orders it in the tier.
+    private struct FocusCandidate
+    {
+        public Vector3 Center;
+        public int Tier;
+        public float Cost;
+    }
+
+    // The centre ComputeFocusOffset puts `spread` at. Turns round the eye are tried in FocusTurns order (either way);
+    // at each turn every distance (the comfortable one, then nearer in FocusDistanceStep steps down to the near limit,
+    // then further) and height; the first turn that has a place keeping every rule ends the search, so the assembly
+    // turns no further than it must. Without such a place: one in view though bigger than FocusFillLimit, then the one
+    // in view most (then nearest the view's direction), then one in the way of something, then any outside the car and
+    // seen past it.
+    private Vector3 FindVisitorPlace(Bounds spread, Vector3 source, float maxDistance, out int foundTier)
+    {
+        foundTier = 5;
+        Vector3 eye = placementEye;
+        Rect free = GetFreeView();
+        Vector3 middle = GetPlacementDirection(free.center);
+        Vector3 look = Vector3.ProjectOnPlane(middle, Vector3.up);
+        if (look.sqrMagnitude < 0.0025f)
+            look = Vector3.ProjectOnPlane(carRestCenter - eye, Vector3.up);
+        look = look.sqrMagnitude > 0.0001f ? look.normalized : carForward;
+        // The line toward the visitor: from the eye to the assembly (seen from above).
+        Vector3 toSource = Vector3.ProjectOnPlane(source - eye, Vector3.up);
+        Vector3 line = toSource.magnitude > 0.2f ? toSource.normalized : look;
+        float slope = middle.y / Mathf.Max(0.05f, Mathf.Sqrt(middle.x * middle.x + middle.z * middle.z));
+        float half = spread.extents.y;
+        float lowest = GetFloorTop() + FloorClearance + half;
+        float highest = Mathf.Max(lowest, eye.y + FocusTopAboveEye - half);
+        bool xr = IsXrView();
+        float comfortable = xr ? FocusEyeDistanceMinXr : FocusEyeDistanceMin;
+        float clearance = xr ? FocusNearClearanceXr : FocusNearClearance;
+        float furthest = Mathf.Max(comfortable, Mathf.Min(FocusEyeDistanceMax + FocusDistanceStretch, maxDistance));
+        float preferred = Mathf.Min(furthest,
+            GetComfortDistance(spread, line, GetChestHeight(eye, slope, 2f, lowest, highest), comfortable, free));
+        float nearest = Mathf.Max(0.3f, clearance + 0.05f);
+        float distanceStep = xr ? FocusDistanceStepXr : FocusDistanceStep;
+
+        FocusCandidate best = new FocusCandidate { Tier = 5, Cost = float.PositiveInfinity };
+        float lineToLook = Vector3.Angle(line, look);
+        float halfView = Mathf.Atan(placementTanX) * Mathf.Rad2Deg;
+        for (int t = 0; t < FocusTurns.Length; t++)
+        {
+            for (int sign = 0; sign < (t == 0 ? 1 : 2); sign++)
+            {
+                float turn = FocusTurns[t] * (sign == 0 ? 1f : -1f);
+                Vector3 direction = Quaternion.AngleAxis(turn, Vector3.up) * line;
+                float lookCost = Vector3.Angle(direction, look);
+                // Nearer first (down to the near limit), then further.
+                int nearerSteps = Mathf.Max(0, Mathf.CeilToInt((preferred - nearest) / distanceStep));
+                int furtherSteps = Mathf.Max(0, Mathf.CeilToInt((furthest - preferred) / distanceStep));
+                for (int n = 0; n <= nearerSteps + furtherSteps; n++)
+                {
+                    float distance = n <= nearerSteps
+                        ? Mathf.Max(nearest, preferred - n * distanceStep)
+                        : Mathf.Min(furthest, preferred + (n - nearerSteps) * distanceStep);
+                    Vector3 ground = eye + direction * distance;
+                    Bounds target = spread;
+                    target.center = new Vector3(ground.x, spread.center.y, ground.z);
+                    // Outside the footprint does not depend on the height.
+                    if (!IsOutsideFootprint(target))
+                        continue;
+                    float chest = GetChestHeight(eye, slope, distance, lowest, highest);
+                    for (int h = 0; h < FocusLifts.Length; h++)
+                    {
+                        float height = chest + FocusLifts[h];
+                        if (height < lowest - 0.001f || height > highest + 0.001f)
+                            continue;
+                        target.center = new Vector3(ground.x, height, ground.z);
+                        if (!SeesPastCar(target.center))
+                            continue;
+                        float cost = FocusTurnCost * Mathf.Abs(turn) +
+                                     (distance < preferred ? FocusNearerCost : FocusFurtherCost) *
+                                     Mathf.Abs(distance - preferred) + FocusLiftCost * Mathf.Abs(FocusLifts[h]);
+                        // Tiers: 0 every rule kept; 1 in view but over FocusFillLimit of the view's height (only nearer
+                        // than that fits on the line, and no turn finds room in view); 2 out of view (in view most,
+                        // then nearest the view's direction); 3 in a keep-out; 4 too near the eye or out of the room.
+                        int tier = 4;
+                        bool near = GetViewerClearance(target, eye) < clearance;
+                        bool room = target.max.y <= FocusMaxHeight + 0.01f &&
+                                    target.min.y >= GetFloorTop() + FloorClearance - 0.01f;
+                        if (!near && room)
+                        {
+                            bool seen = TryGetViewRect(target, out Rect rect);
+                            float share = seen ? GetShare(rect, free) : 0f;
+                            // Over FocusFillLimit of the view's height costs in every tier (a place out of view
+                            // can still be a wheel or a door filling the view right beside the eye).
+                            float over = seen ? Mathf.Max(0f, rect.height - FocusFillLimit) : 0f;
+                            if (IntersectsKeepOut(target))
+                            {
+                                tier = 3;
+                                cost = 100f * (1f - share) + lookCost + 0.1f * cost + 100f * over;
+                            }
+                            else if (share >= ViewShareRequired)
+                            {
+                                tier = over > 0f ? 1 : 0;
+                                cost += 100f * over;
+                            }
+                            else
+                            {
+                                tier = 2;
+                                cost = 100f * (1f - share) + lookCost + 0.1f * cost + 100f * over;
+                            }
+                        }
+                        if (tier < best.Tier || (tier == best.Tier && cost < best.Cost))
+                            best = new FocusCandidate { Center = target.center, Tier = tier, Cost = cost };
+                    }
+                }
+            }
+            // Every rule kept at this turn: no further turn can cost less. Past the side of the view no further turn
+            // can bring it into view: the search ends once something outside the car is found.
+            if (best.Tier == 0)
+                break;
+            if (best.Tier <= 2 && FocusTurns[t] > lineToLook + halfView + 10f)
+                break;
+        }
+        foundTier = best.Tier;
+        if (best.Tier < 5)
+            return best.Center;
+        // Nothing outside the car at all (cannot happen round a car on the floor): straight ahead.
+        Vector3 ahead = eye + look * preferred;
+        ahead.y = GetChestHeight(eye, slope, preferred, lowest, highest);
+        return ahead;
+    }
+
+    // About chest height `distance` ahead: on the middle line of the free view where it runs between
+    // FocusChestBelowEye and BelowEye under the eye, else the nearer of those; within [lowest, highest].
+    private static float GetChestHeight(Vector3 eye, float slope, float distance, float lowest, float highest)
+    {
+        float height = Mathf.Clamp(eye.y + slope * distance, eye.y - FocusChestBelowEye, eye.y - BelowEye);
+        return Mathf.Clamp(height, lowest, highest);
+    }
+
+    // How far ahead (horizontally) the box fills about FocusFill of the view's height and fits FocusFreeFit of the
+    // free view's width and height: measured with its centre 2 m ahead at `height` (its screen box shrinks with the
+    // distance), within [nearest, FocusEyeDistanceMax].
+    private float GetComfortDistance(Bounds box, Vector3 direction, float height, float nearest, Rect free)
+    {
+        const float probe = 2f;
+        box.center = new Vector3(placementEye.x, height, placementEye.z) + direction * probe;
+        float distance = nearest;
+        if (TryGetViewRect(box, out Rect rect))
+        {
+            distance = Mathf.Max(distance, probe * rect.height / FocusFill);
+            distance = Mathf.Max(distance, probe * rect.width / Mathf.Max(0.05f, free.width * FocusFreeFit));
+            distance = Mathf.Max(distance, probe * rect.height / Mathf.Max(0.05f, free.height * FocusFreeFit));
+        }
+        else
+            distance = Mathf.Max(distance, box.extents.magnitude / Mathf.Max(0.05f, placementTanY * FocusFill));
+        return Mathf.Min(distance, FocusEyeDistanceMax);
     }
 
     // Clear of the viewer (horizontally, unless overhead), under the height limit, off the floor and out of the
@@ -762,54 +990,249 @@ public sealed partial class CarExplorerController
         return (placed ? 50f : 0f) + (clear ? 25f : 0f) + 40f * share + 0.5f * room;
     }
 
-    // After a level opens or closes, the taken-out assembly stays where it is if its new size still fits there and,
-    // while it is what the visitor looks at (in one piece or apart one level), is still in view; else it takes a new
-    // place. True when it moved.
+    // After a level opens or closes, or when a part of it is clicked again, the taken-out assembly stays where it is
+    // while it is in view (any part of its box in the free view) and the car does not hide it from the eye; else (the
+    // visitor walked away or round the car) it comes to the visitor again by the same rules and the same kind of path
+    // (ComputeFocusOffset from where it stands). In one piece or one level apart it also comes again when it is no
+    // longer within reach (FocusEyeDistanceMax + FocusRefitSlack from the eye), never to a place more than
+    // FocusRefitFurther further (KeepOutOfFootprint then keeps every open level out of the car). True when it moved.
     private bool RefitTakenOut()
     {
-        if (takenOut == null || view == CarExplorerView.Exploded || !takenOut.Relocates || openPath.Count > 1)
+        if (takenOut == null || view == CarExplorerView.Exploded || !takenOut.Relocates)
             return false;
-        Bounds spread = GetPlannedBounds(takenOut, false);
-        Bounds rotated = RotateBounds(spread, takenOut.FocusYaw, takenOut.FocusPivot);
-        rotated.center += takenOut.FocusOffset;
-        Vector3 viewer = viewCamera != null ? viewCamera.transform.position : carRestCenter + carForward * 6f;
-        GatherFocusKeepOuts();
-        GatherPartBoxes(takenOut);
-        ScoreView(rotated, viewer, FocusMaxHeight, FocusViewerClearance, out bool valid);
-        if (valid)
-            return false;
-        float stayShare = GetViewShare(rotated);
+        PreparePlacementView();
         Vector3 before = takenOut.FocusOffset;
         float yaw = takenOut.FocusYaw;
-        Vector3 pivot = takenOut.FocusPivot;
-        // An opening level does not send the assembly away from the visitor: only places at most RefitFurther further
-        // from the eye than where it stands count; without a valid one, the best of them moves it only when more of it
-        // is in the free view there than where it came out.
-        float limit = Vector3.Distance(viewer, rotated.center) + RefitFurther;
-        takenOut.FocusOffset = ComputeFocusOffset(takenOut, spread, limit);
-        Bounds moved = RotateBounds(spread, takenOut.FocusYaw, takenOut.FocusPivot);
-        moved.center += takenOut.FocusOffset;
-        ScoreView(moved, viewer, FocusMaxHeight, FocusViewerClearance, out bool moveValid);
-        if (Vector3.Distance(viewer, moved.center) > limit + 0.01f ||
-            (!moveValid && GetViewShare(moved) <= stayShare + 0.05f))
-        {
-            takenOut.FocusOffset = before;
-            takenOut.FocusYaw = yaw;
-            takenOut.FocusPivot = pivot;
-            return false;
-        }
+        Bounds spread = GetPlannedBounds(takenOut, false);
+        Bounds placed = RotateBounds(spread, takenOut.FocusYaw, takenOut.FocusPivot);
+        placed.center += takenOut.FocusOffset;
+        bool hidden = !SeesPastCar(placed.center) || GetViewShare(placed) <= 0.05f;
+        if (hidden)
+            takenOut.FocusOffset = ComputeFocusOffset(takenOut, spread, placed.center);
         return takenOut.FocusOffset != before || takenOut.FocusYaw != yaw;
     }
 
+    // Every part of the taken-out assembly, as planned, outside the car's footprint: where an open level reaches
+    // into it, the assembly moves away from the car toward the visitor (along the line to the eye, or straight out of
+    // the side it is at), as little as it must, while that keeps FocusNearClearance from the eye and the levels in
+    // view. Where neither fits between the car and the visitor, the whole assembly with its open levels takes a new place by the same rules as
+    // taking it out (ComputeFocusOffset from where it stands: the least turn, in view where it can be); only when that
+    // finds no place outside the car does it go out toward the visitor regardless. Out of the car with room to spare,
+    // it keeps FocusNearClearance from the eye, backing toward the car no further than the footprint allows.
+    private void KeepOutOfFootprint()
+    {
+        if (takenOut == null || view == CarExplorerView.Exploded || !takenOut.Relocates)
+            return;
+        PreparePlacementView();
+        Vector3 eye = placementEye;
+        Bounds whole = GetPlannedBounds(takenOut, true);
+        Vector3 toEye = Vector3.ProjectOnPlane(eye - whole.center, Vector3.up);
+        Vector3 side = GetFootprintNormal(whole.center);
+        Vector3 along = toEye.sqrMagnitude > 0.01f ? toEye.normalized : side;
+        float clearance = IsXrView() ? FocusNearClearanceXr : FocusNearClearance;
+        float need = GetFootprintExit(takenOut, along);
+        if (need <= 0f)
+        {
+            GetExtentAlong(whole, along, out float center, out float halfAlong);
+            float room = Vector3.Dot(eye, along) - (center + halfAlong) - clearance;
+            if (room < 0f && GetViewerClearance(whole, eye) < clearance)
+            {
+                takenOut.FocusOffset += along * Mathf.Max(room, need);
+                return;
+            }
+            // XR: opened near the eye, the assembly with its levels can be bigger than the view (the V6 one level
+            // apart, 1.8 m wide, 0.96 m from the eye filled 137 % of its height); it backs toward the car, in
+            // FocusBackStep steps up to FocusBackMax and as far as the footprint allows, seen past the car, to the
+            // first place where the levels are in view.
+            if (IsXrView() && openPath.Count > 0 && GetViewShare(whole) < ViewShareRequired)
+            {
+                float back = float.IsNegativeInfinity(need) ? FocusBackMax : Mathf.Min(-need, FocusBackMax);
+                for (int n = 1; n * FocusBackStep <= back + 0.001f; n++)
+                {
+                    Bounds moved = whole;
+                    moved.center -= along * (n * FocusBackStep);
+                    if (!SeesPastCar(moved.center))
+                        break;
+                    if (GetViewShare(moved) >= ViewShareRequired)
+                    {
+                        takenOut.FocusOffset -= along * (n * FocusBackStep);
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+        float sideNeed = GetFootprintExit(takenOut, side);
+        Bounds byLine = whole, bySide = whole;
+        bool lineFinite = !float.IsInfinity(need);
+        bool sideFinite = sideNeed > 0f && !float.IsInfinity(sideNeed);
+        if (lineFinite)
+            byLine.center += along * need;
+        if (sideFinite)
+            bySide.center += side * sideNeed;
+        bool lineClear = lineFinite && GetViewerClearance(byLine, eye) >= clearance;
+        bool sideClear = sideFinite && GetViewerClearance(bySide, eye) >= clearance;
+        float lineShare = lineClear ? GetViewShare(byLine) : 0f;
+        float sideShare = sideClear ? GetViewShare(bySide) : 0f;
+        bool lineFree = lineClear && lineShare >= ViewShareRequired;
+        bool sideFree = sideClear && sideShare >= ViewShareRequired;
+        if (lineFree && (!sideFree || need <= 1.5f * sideNeed))
+        {
+            takenOut.FocusOffset += along * need;
+            return;
+        }
+        if (sideFree)
+        {
+            takenOut.FocusOffset += side * sideNeed;
+            return;
+        }
+        // Neither push keeps the open levels in the free view (too big so near). A push that keeps the near clearance
+        // still stands unless a new place by the take-out rules shows more of them and lies at most FocusKeepTurn
+        // round the eye from where the assembly is (a new place far aside or past the car loses the visitor's
+        // place in what they were looking at), or the push shows less than FocusKeepShareMin of them.
+        Vector3 before = takenOut.FocusOffset;
+        float yawBefore = takenOut.FocusYaw;
+        Vector3 pivotBefore = takenOut.FocusPivot;
+        Vector3 stepBefore = pendingStepBack;
+        Vector3 eyeBefore = placementEye;
+        bool shiftedBefore = placementShifted;
+        bool pushClear = lineClear || sideClear;
+        bool pushLine = lineClear && (!sideClear || need <= 1.5f * sideNeed || lineShare >= sideShare);
+        Vector3 push = pushLine ? along * need : side * (sideClear ? sideNeed : 0f);
+        float pushShare = pushLine ? lineShare : sideShare;
+        takenOut.FocusOffset = ComputeFocusOffset(takenOut, GetPlannedBounds(takenOut, false), whole.center);
+        float again = GetFootprintExit(takenOut, along);
+        bool placed = !(again > 0f && !float.IsInfinity(again));
+        if (pushClear)
+        {
+            bool better = false;
+            if (placed)
+            {
+                if (pendingStepBack != stepBefore)
+                    better = true;
+                else
+                {
+                    Bounds now = GetPlannedBounds(takenOut, true);
+                    Vector3 from = Vector3.ProjectOnPlane(whole.center - eyeBefore, Vector3.up);
+                    Vector3 to = Vector3.ProjectOnPlane(now.center - eyeBefore, Vector3.up);
+                    better = GetViewShare(now) > pushShare &&
+                             (Vector3.Angle(from, to) <= FocusKeepTurn || pushShare < FocusKeepShareMin);
+                }
+            }
+            if (!better)
+            {
+                takenOut.FocusYaw = yawBefore;
+                takenOut.FocusPivot = pivotBefore;
+                pendingStepBack = stepBefore;
+                placementEye = eyeBefore;
+                placementShifted = shiftedBefore;
+                takenOut.FocusOffset = before + push;
+            }
+            return;
+        }
+        if (!placed)
+        {
+            takenOut.FocusYaw = yawBefore;
+            takenOut.FocusOffset = before + along * need;
+        }
+    }
+
+    // How far round the eye (degrees) a new place for an opened assembly may lie from where it is, instead of the
+    // push out of the footprint toward the visitor (KeepOutOfFootprint); a push that leaves less than
+    // FocusKeepShareMin of the levels' screen box in the free view gives way to any new place that shows more.
+    private const float FocusKeepTurn = 15f;
+    private const float FocusKeepShareMin = 0.5f;
+
+    // How far the taken-out assembly, as planned, has to move along `direction` (horizontal) until none of its parts'
+    // boxes overlaps the footprint; when none does, 0 or less: minus the room it has back toward the car (minus
+    // infinity when nothing would run into it).
+    private float GetFootprintExit(Node assembly, Vector3 direction)
+    {
+        float wf = Vector3.Dot(direction, carForward), wr = Vector3.Dot(direction, carRight);
+        float need = float.NegativeInfinity, back = float.NegativeInfinity;
+        bool any = false;
+        foreach (Part part in assembly.AllParts)
+        {
+            Vector3 move = GetPlannedWorld(part.Leaf);
+            foreach (Renderer renderer in part.Renderers)
+            {
+                if (renderer == null) continue;
+                Bounds box = GetRestRendererBounds(part, renderer);
+                box.center += move;
+                if (assembly == takenOut && assembly.FocusYaw != 0f)
+                    box = RotateBounds(box, assembly.FocusYaw, assembly.FocusPivot + GetPlannedOffset(assembly));
+                // The interval of moves t along the direction for which this box overlaps the footprint.
+                GetFootprintSpan(box, out float bf, out float hf, out float br, out float hr);
+                if (!OverlapInterval(bf, hf, footprintCenterF, footprintHalfF, wf, out float lo1, out float hi1) ||
+                    !OverlapInterval(br, hr, footprintCenterR, footprintHalfR, wr, out float lo2, out float hi2))
+                    continue;
+                float lo = Mathf.Max(lo1, lo2), hi = Mathf.Min(hi1, hi2);
+                if (lo >= hi)
+                    continue;
+                // Overlapping where it is: out by the far end of the overlap; else the overlap behind it limits the
+                // way back (one ahead of it lies beyond the car, never a way to go).
+                if (lo < 0f && hi > 0f)
+                {
+                    any = true;
+                    need = Mathf.Max(need, hi);
+                }
+                else if (hi <= 0f)
+                    back = Mathf.Max(back, hi);
+            }
+        }
+        // The taken-out assembly's whole box (with every open level) counts too: parts each outside the footprint
+        // can still reach round a corner of it (the V6 apart: the intake over one side, the rockers beside another).
+        if (assembly == takenOut)
+        {
+            Bounds union = GetPlannedBounds(assembly, true);
+            if (assembly.FocusYaw != 0f)
+                union = RotateBounds(union, assembly.FocusYaw, assembly.FocusPivot + GetPlannedOffset(assembly));
+            GetFootprintSpan(union, out float bf, out float hf, out float br, out float hr);
+            if (OverlapInterval(bf, hf, footprintCenterF, footprintHalfF, wf, out float lo1, out float hi1) &&
+                OverlapInterval(br, hr, footprintCenterR, footprintHalfR, wr, out float lo2, out float hi2))
+            {
+                float lo = Mathf.Max(lo1, lo2), hi = Mathf.Min(hi1, hi2);
+                if (lo < hi && lo < 0f && hi > 0f)
+                {
+                    any = true;
+                    need = Mathf.Max(need, hi);
+                }
+                else if (lo < hi && hi <= 0f)
+                    back = Mathf.Max(back, hi);
+            }
+        }
+        return any ? need + 0.01f : back;
+    }
+
+    // The moves t (along a direction with component w on this axis) for which an interval [b-h, b+h] overlaps the
+    // footprint's [c-fh, c+fh]: false when none do; (-inf, inf) when the direction does not change it and it overlaps.
+    private static bool OverlapInterval(float b, float h, float c, float fh, float w, out float lo, out float hi)
+    {
+        float reach = h + fh;
+        if (Mathf.Abs(w) < 1e-4f)
+        {
+            lo = float.NegativeInfinity;
+            hi = float.PositiveInfinity;
+            return Mathf.Abs(b - c) < reach;
+        }
+        float a = (c - reach - b) / w, z = (c + reach - b) / w;
+        lo = Mathf.Min(a, z);
+        hi = Mathf.Max(a, z);
+        return true;
+    }
+
     // The cockpit turns its dashboard and wheel (the driver's side) to the viewer, the seats their fronts; the
-    // rest keep their orientation, so a door or wheel shows its outer face and spreads across the view.
+    // rest keep their orientation, so a door or wheel shows its outer face and spreads across the view. An assembly
+    // with a part hung under another assembly's part (TurnBlocked) keeps its heading: that part could not turn with it.
     private float GetFocusYaw(Node assembly, Vector3 pivot, Vector3 viewer)
     {
         Vector3 face;
+        if (assembly.TurnBlocked)
+            return 0f;
+        // Only the cockpit turns (its dashboard toward the viewer); the seats keep their heading: turned on the way,
+        // their drawn boxes ran into the car's parts after leaving their place (measured in every X-ray take-out).
         if (assembly.Kind == AssemblyKind.Cockpit)
             face = -carForward;
-        else if (assembly.Kind == AssemblyKind.Seats)
-            face = carForward;
         else
             return 0f;
         Vector3 toViewer = Vector3.ProjectOnPlane(viewer - pivot, Vector3.up);
@@ -818,6 +1241,456 @@ public sealed partial class CarExplorerController
         float yaw = Vector3.SignedAngle(face, toViewer, Vector3.up);
         // Small turns are left out: they only make the assembly look askew.
         return Mathf.Abs(yaw) < 20f ? 0f : yaw;
+    }
+
+    // ---------------------------------------------------------------- the car's footprint, its top and the paths
+
+    // The car's rest bounds in its own horizontal axes (relative to its rest centre), seen from above and grown by
+    // FootprintMargin: what a taken-out assembly ends outside of. Its box (not grown) is what must not stand between
+    // the eye and the assembly.
+    private void MeasureFootprint()
+    {
+        float fMin = float.PositiveInfinity, fMax = float.NegativeInfinity;
+        float rMin = float.PositiveInfinity, rMax = float.NegativeInfinity;
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 corner = GetBoxCorner(carRestBounds, i) - carRestCenter;
+            float f = Vector3.Dot(corner, carForward), r = Vector3.Dot(corner, carRight);
+            fMin = Mathf.Min(fMin, f); fMax = Mathf.Max(fMax, f);
+            rMin = Mathf.Min(rMin, r); rMax = Mathf.Max(rMax, r);
+        }
+        bodyCenterF = 0.5f * (fMin + fMax);
+        bodyHalfF = 0.5f * (fMax - fMin);
+        bodyCenterR = 0.5f * (rMin + rMax);
+        bodyHalfR = 0.5f * (rMax - rMin);
+        footprintCenterF = bodyCenterF;
+        footprintCenterR = bodyCenterR;
+        footprintHalfF = bodyHalfF + FootprintMargin;
+        footprintHalfR = bodyHalfR + FootprintMargin;
+    }
+
+    // A box's centre and half size along the car's forward and right axes (relative to its rest centre).
+    private void GetFootprintSpan(Bounds box, out float centerF, out float halfF, out float centerR, out float halfR)
+    {
+        Vector3 local = box.center - carRestCenter;
+        Vector3 e = box.extents;
+        centerF = Vector3.Dot(local, carForward);
+        halfF = Mathf.Abs(e.x * carForward.x) + Mathf.Abs(e.z * carForward.z);
+        centerR = Vector3.Dot(local, carRight);
+        halfR = Mathf.Abs(e.x * carRight.x) + Mathf.Abs(e.z * carRight.z);
+    }
+
+    // Seen from above, the box lies outside the car's footprint (grown by FootprintMargin, plus `extra`).
+    private bool IsOutsideFootprint(Bounds box, float extra = 0f)
+    {
+        GetFootprintSpan(box, out float bf, out float hf, out float br, out float hr);
+        return Mathf.Abs(bf - footprintCenterF) >= hf + footprintHalfF + extra ||
+               Mathf.Abs(br - footprintCenterR) >= hr + footprintHalfR + extra;
+    }
+
+    // The car's box (not grown) does not stand between the eye and the point.
+    private bool SeesPastCar(Vector3 point)
+    {
+        Vector3 a = placementEye - carRestCenter, b = point - carRestCenter;
+        float tMin = 0f, tMax = 1f;
+        return ClipSlab(Vector3.Dot(a, carForward), Vector3.Dot(b, carForward), bodyCenterF - bodyHalfF,
+                   bodyCenterF + bodyHalfF, ref tMin, ref tMax) == false ||
+               ClipSlab(Vector3.Dot(a, carRight), Vector3.Dot(b, carRight), bodyCenterR - bodyHalfR,
+                   bodyCenterR + bodyHalfR, ref tMin, ref tMax) == false ||
+               ClipSlab(placementEye.y, point.y, carRestBounds.min.y, carRestBounds.max.y, ref tMin, ref tMax) == false;
+    }
+
+    // Narrows [tMin, tMax] of the segment a..b to the slab [min, max] on one axis; false when nothing is left.
+    private static bool ClipSlab(float a, float b, float min, float max, ref float tMin, ref float tMax)
+    {
+        float d = b - a;
+        if (Mathf.Abs(d) < 1e-6f)
+            return a > min && a < max;
+        float t1 = (min - a) / d, t2 = (max - a) / d;
+        if (t1 > t2) { float s = t1; t1 = t2; t2 = s; }
+        tMin = Mathf.Max(tMin, t1);
+        tMax = Mathf.Min(tMax, t2);
+        return tMin < tMax;
+    }
+
+    // The outward normal (horizontal) of the footprint's side the point lies furthest beyond.
+    private Vector3 GetFootprintNormal(Vector3 point)
+    {
+        Vector3 local = point - carRestCenter;
+        float f = (Vector3.Dot(local, carForward) - footprintCenterF) / Mathf.Max(0.01f, footprintHalfF);
+        float r = (Vector3.Dot(local, carRight) - footprintCenterR) / Mathf.Max(0.01f, footprintHalfR);
+        return Mathf.Abs(f) > Mathf.Abs(r) ? carForward * Mathf.Sign(f) : carRight * (r >= 0f ? 1f : -1f);
+    }
+
+    // The top of the car (its own parts, not the content inside) on a grid seen from above, found once from the exact
+    // picking meshes at their rest poses (a ray down per BodyCell cell). Until the picking meshes are ready the top of
+    // the car's box stands for it.
+    private void EnsureBodyHeights()
+    {
+        if (bodyHeights != null || !pickReady || !pickPhysics.IsValid())
+            return;
+        foreach (Part part in pickParts)
+        {
+            Transform picker = part.PickCollider != null ? part.PickCollider.transform : null;
+            if (picker == null)
+                continue;
+            if (trackByTransform.TryGetValue(part.Target, out MotionTrack track))
+                picker.SetPositionAndRotation(track.RestWorldPosition,
+                    track.ParentRestRotation * track.RestLocalRotation);
+            else
+                picker.SetPositionAndRotation(part.Target.position, part.Target.rotation);
+            picker.localScale = part.Target.lossyScale;
+        }
+        Physics.SyncTransforms();
+        float pad = FootprintMargin + 2f * BodyCell;
+        bodyCellsF = Mathf.Max(1, Mathf.CeilToInt(2f * (bodyHalfF + pad) / BodyCell));
+        bodyCellsR = Mathf.Max(1, Mathf.CeilToInt(2f * (bodyHalfR + pad) / BodyCell));
+        bodyCellOriginF = bodyCenterF - bodyHalfF - pad;
+        bodyCellOriginR = bodyCenterR - bodyHalfR - pad;
+        bodyHeights = new float[bodyCellsF * bodyCellsR];
+        float top = carRestBounds.max.y + 0.5f;
+        float depth = top - carRestBounds.min.y + 0.5f;
+        for (int i = 0; i < bodyCellsF; i++)
+            for (int j = 0; j < bodyCellsR; j++)
+            {
+                Vector3 origin = carRestCenter + carForward * (bodyCellOriginF + (i + 0.5f) * BodyCell) +
+                                 carRight * (bodyCellOriginR + (j + 0.5f) * BodyCell);
+                origin.y = top;
+                int count = pickPhysics.Raycast(origin, Vector3.down, heightHits, depth,
+                    Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+                float height = float.NegativeInfinity;
+                for (int k = 0; k < count; k++)
+                    if (partByPickCollider.TryGetValue(heightHits[k].collider, out Part hit) && !hit.IsInner)
+                        height = Mathf.Max(height, heightHits[k].point.y);
+                // A full buffer may have left the top out: the box's top stands for it.
+                bodyHeights[i * bodyCellsR + j] = count >= heightHits.Length ? carRestBounds.max.y : height;
+            }
+    }
+
+    // The highest point of the car's top under the box seen from above (a cell's neighbours count, for thin parts
+    // between the rays); minus infinity where the box is off the car.
+    private float GetBodyTop(Bounds box)
+    {
+        GetFootprintSpan(box, out float bf, out float hf, out float br, out float hr);
+        if (Mathf.Abs(bf - bodyCenterF) >= hf + bodyHalfF || Mathf.Abs(br - bodyCenterR) >= hr + bodyHalfR)
+            return float.NegativeInfinity;
+        if (bodyHeights == null)
+            return carRestBounds.max.y;
+        int i0 = Mathf.Max(0, Mathf.FloorToInt((bf - hf - bodyCellOriginF) / BodyCell) - 1);
+        int i1 = Mathf.Min(bodyCellsF - 1, Mathf.FloorToInt((bf + hf - bodyCellOriginF) / BodyCell) + 1);
+        int j0 = Mathf.Max(0, Mathf.FloorToInt((br - hr - bodyCellOriginR) / BodyCell) - 1);
+        int j1 = Mathf.Min(bodyCellsR - 1, Mathf.FloorToInt((br + hr - bodyCellOriginR) / BodyCell) + 1);
+        float height = float.NegativeInfinity;
+        for (int i = i0; i <= i1; i++)
+            for (int j = j0; j <= j1; j++)
+                height = Mathf.Max(height, bodyHeights[i * bodyCellsR + j]);
+        return height;
+    }
+
+    // The highest point of the car's top under the box as it moves (horizontally) from a to b.
+    private float GetBodyTopAlong(Bounds box, Vector3 a, Vector3 b)
+    {
+        float length = HorizontalDistance(a, b);
+        int steps = Mathf.Max(1, Mathf.CeilToInt(length / (0.5f * BodyCell)));
+        float height = float.NegativeInfinity;
+        for (int s = 0; s <= steps; s++)
+        {
+            box.center = Vector3.Lerp(a, b, s / (float)steps);
+            height = Mathf.Max(height, GetBodyTop(box));
+        }
+        return height;
+    }
+
+    // Eyes checked along a desktop step back's glide (from where the visitor stood to where it ends), so a path that
+    // crosses the way they glide goes over their head: the walking body's capsule is pushed or lifted by a part that
+    // runs into it.
+    private const int GlideEyeSamples = 6;
+
+    // PassesVisitor for the placement eye, and while a step back is planned for every eye along its glide.
+    private bool PassesGlidingVisitor(Bounds box, Vector3 a, Vector3 b)
+    {
+        if (PassesVisitor(box, a, b, placementEye))
+            return true;
+        if (!placementShifted)
+            return false;
+        for (int e = 1; e <= GlideEyeSamples; e++)
+            if (PassesVisitor(box, a, b, Vector3.Lerp(placementEye, placementBodyEye, e / (float)GlideEyeSamples)))
+                return true;
+        return false;
+    }
+
+    // Whether the box moving in a straight line from a to b comes within PathViewerClearance (horizontally) of the eye
+    // below the head (GetViewerClearance counts a box over the head as clear).
+    private static bool PassesVisitor(Bounds box, Vector3 a, Vector3 b, Vector3 eye)
+    {
+        int steps = Mathf.Max(1, Mathf.CeilToInt(Vector3.Distance(a, b) / (0.5f * BodyCell)));
+        for (int s = 0; s <= steps; s++)
+        {
+            box.center = Vector3.Lerp(a, b, s / (float)steps);
+            if (GetViewerClearance(box, eye) < PathViewerClearance)
+                return true;
+        }
+        return false;
+    }
+
+    // Whether the box moving in a straight line from a to b stays above the car's top wherever it is over the car.
+    private bool IsClearAlong(Bounds box, Vector3 a, Vector3 b)
+    {
+        float length = Vector3.Distance(a, b);
+        int steps = Mathf.Max(1, Mathf.CeilToInt(length / (0.5f * BodyCell)));
+        for (int s = 0; s <= steps; s++)
+        {
+            box.center = Vector3.Lerp(a, b, s / (float)steps);
+            if (box.min.y < GetBodyTop(box) + 0.5f * PathClearance)
+                return false;
+        }
+        return true;
+    }
+
+    // The box an assembly travels as: closed (its levels open after it arrives and close before it leaves), with its
+    // levels as they are and as planned where they stay open, and, when it turns on the way, every heading it passes.
+    private Bounds GetTravelBox(Node assembly)
+    {
+        Bounds box = assembly.RestBounds;
+        foreach (Part part in assembly.AllParts)
+        {
+            Vector3 now = part.Leaf.World - assembly.World;
+            Vector3 planned = GetPlannedWorld(part.Leaf) - GetPlannedOffset(assembly);
+            foreach (Renderer renderer in part.Renderers)
+            {
+                if (renderer == null) continue;
+                Bounds bounds = GetRestRendererBounds(part, renderer);
+                Bounds moved = bounds;
+                moved.center += now;
+                box.Encapsulate(moved);
+                moved.center = bounds.center + planned;
+                box.Encapsulate(moved);
+            }
+        }
+        if (assembly.FromYaw != 0f || assembly.TargetYaw != 0f)
+        {
+            Vector3 pivot = assembly.FocusPivot;
+            float radius = 0f;
+            for (int i = 0; i < 8; i++)
+                radius = Mathf.Max(radius, HorizontalDistance(GetBoxCorner(box, i), pivot));
+            box = new Bounds(new Vector3(pivot.x, box.center.y, pivot.z),
+                new Vector3(2f * radius, box.size.y, 2f * radius));
+        }
+        return box;
+    }
+
+    // The way a taken-out assembly goes (outside the exploded view), as offsets from its rest place: never straight
+    // through the car. Out of its place first (straight up until its bottom clears the car's top over it, or, for a
+    // door or a wheel, straight out of the side until it is clear of the footprint), then at a height where it clears
+    // the car's top (PathClearance) everywhere on the way, over to its new place, and down (or up) onto it. Put back
+    // runs the way out in reverse; a move between two places outside the car goes straight when nothing is in the
+    // way, else up, over and down. The corners are rounded (PathCornerRadius) and the speed eases in and out.
+    // The path is checked as it will be run (PathCheckSamples points along its eased length): where the travelling box
+    // runs into another part after it first cleared its place, the way over the car is raised by PathRaiseStep and the
+    // path built again, at most PathRaiseTries times.
+    private void BuildPath(Node assembly)
+    {
+        bool overHead = false;
+        for (int attempt = 0; attempt <= PathRaiseTries; attempt++)
+        {
+            BuildPath(assembly, attempt * PathRaiseStep, overHead);
+            if (assembly.PathCount == 0)
+                return;
+            bool nearVisitor = PathPassesVisitor(assembly);
+            if (!nearVisitor && !PathHitsAfterLeaving(assembly))
+                return;
+            overHead |= nearVisitor;
+        }
+    }
+
+    // Whether the path as it will run (PathCheckSamples points along its eased length, corners rounded) brings the
+    // travelling box nearer than PathViewerClearance to the visitor's eye below their head (while a step back is
+    // planned, any eye on the glide from where they stood to where it ends), nearer than both of its ends are: an end
+    // place itself keeps the near clearance.
+    private bool PathPassesVisitor(Node assembly)
+    {
+        PreparePlacementView();
+        Bounds box = GetTravelBox(assembly);
+        Vector3 rest = box.center;
+        bool home = assembly.Target == Vector3.zero;
+        for (int eyeIndex = 0; eyeIndex <= (placementShifted ? GlideEyeSamples : 0); eyeIndex++)
+        {
+            Vector3 eye = Vector3.Lerp(placementEye, placementBodyEye, eyeIndex / (float)GlideEyeSamples);
+            box.center = rest + assembly.Path[0];
+            float limit = GetViewerClearance(box, eye);
+            box.center = rest + assembly.Path[assembly.PathCount - 1];
+            limit = Mathf.Min(PathViewerClearance, limit, GetViewerClearance(box, eye)) - 0.02f;
+            for (int k = 1; k < PathCheckSamples; k++)
+            {
+                float amount = k / (float)PathCheckSamples;
+                box.center = rest + EvaluatePath(assembly, home ? 1f - amount : amount);
+                if (GetViewerClearance(box, eye) < limit)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private bool PathHitsAfterLeaving(Node assembly)
+    {
+        Bounds box = GetTravelBox(assembly);
+        Vector3 rest = box.center;
+        bool home = assembly.Target == Vector3.zero;
+        GatherPartBoxes(assembly);
+        bool cleared = false;
+        for (int k = 0; k <= PathCheckSamples; k++)
+        {
+            float amount = k / (float)PathCheckSamples;
+            box.center = rest + EvaluatePath(assembly, home ? 1f - amount : amount);
+            bool hit = HitsParts(box);
+            if (!hit)
+                cleared = true;
+            else if (cleared)
+                return true;
+        }
+        return false;
+    }
+
+    private void BuildPath(Node assembly, float raise, bool overHead)
+    {
+        assembly.PathCount = 0;
+        if (view == CarExplorerView.Exploded || !assembly.Moving || assembly.From == assembly.Target)
+            return;
+        Bounds box = GetTravelBox(assembly);
+        Vector3 rest = box.center;
+        bool home = assembly.Target == Vector3.zero;
+        Vector3 start = rest + (home ? assembly.Target : assembly.From);
+        Vector3 end = rest + (home ? assembly.From : assembly.Target);
+        pathScratch.Clear();
+        pathScratch.Add(start);
+        Vector3 at = start;
+        box.center = start;
+        // Leaving its own place (the way out from rest, or the way home run backwards): a door or a wheel goes
+        // straight out of the side, unless that would bring it to the visitor standing there; then it lifts out.
+        bool atRest = (home ? assembly.Target : assembly.From) == Vector3.zero;
+        bool inCar = !IsOutsideFootprint(box) && box.min.y < GetBodyTop(box) + PathClearance;
+        if (!overHead && atRest && inCar && (assembly.Kind == AssemblyKind.Door || assembly.Kind == AssemblyKind.Wheel))
+        {
+            Vector3 outward = carRight * (assembly.Side != 0f ? assembly.Side : 1f);
+            GetFootprintSpan(box, out float bf, out float hf, out float br, out float hr);
+            float edge = outward == carRight ? footprintCenterR + footprintHalfR : footprintCenterR - footprintHalfR;
+            float travel = Mathf.Max(0f, Vector3.Dot(outward, carRight) * (edge - br) + hr + 0.02f);
+            Bounds outside = box;
+            outside.center = start + outward * travel;
+            PreparePlacementView();
+            // The whole sideways leg (run either way) keeps clear of the visitor, not only its end.
+            if (!PassesGlidingVisitor(box, start, outside.center))
+            {
+                at = outside.center;
+                pathScratch.Add(at);
+            }
+        }
+        box.center = at;
+        PreparePlacementView();
+        bool pastVisitor = PassesGlidingVisitor(box, at, end);
+        if (pastVisitor || overHead || raise > 0f || !IsClearAlong(box, at, end))
+        {
+            // Up to a height where its bottom clears the car's top everywhere under its way (and the visitor's head
+            // where it passes them), then over and down.
+            float top = Mathf.Max(GetBodyTop(box), GetBodyTopAlong(box, at, end));
+            float over = top + PathClearance + raise + box.extents.y;
+            Bounds high = box;
+            high.center = new Vector3(at.x, over, at.z);
+            if (overHead || PassesGlidingVisitor(high, high.center, new Vector3(end.x, over, end.z)))
+                over = Mathf.Max(over, placementEye.y + BelowEye + PathClearance + raise + box.extents.y);
+            if (at.y < over - 0.005f)
+                pathScratch.Add(new Vector3(at.x, over, at.z));
+            if (end.y < over - 0.005f)
+                pathScratch.Add(new Vector3(end.x, Mathf.Max(over, at.y), end.z));
+        }
+        pathScratch.Add(end);
+        if (home)
+            pathScratch.Reverse();
+        int count = 0;
+        if (assembly.Path == null || assembly.Path.Length < pathScratch.Count)
+            assembly.Path = new Vector3[Mathf.Max(6, pathScratch.Count)];
+        foreach (Vector3 point in pathScratch)
+        {
+            Vector3 offset = point - rest;
+            if (count > 0 && (offset - assembly.Path[count - 1]).sqrMagnitude < 1e-6f)
+                continue;
+            assembly.Path[count++] = offset;
+        }
+        // Exactly the move's ends.
+        assembly.Path[0] = assembly.From;
+        assembly.Path[count - 1] = assembly.Target;
+        if (count < 3)
+            return;
+        assembly.PathCount = count;
+        assembly.PathLength = 0f;
+        for (int i = 1; i < count; i++)
+            assembly.PathLength += Vector3.Distance(assembly.Path[i - 1], assembly.Path[i]);
+        // It turns (the cockpit, the seats) once it is out of its place and before it settles.
+        float first = Vector3.Distance(assembly.Path[0], assembly.Path[1]);
+        float last = Vector3.Distance(assembly.Path[count - 2], assembly.Path[count - 1]);
+        assembly.PathTurnStart = Mathf.Clamp01(first / Mathf.Max(1e-4f, assembly.PathLength));
+        assembly.PathTurnEnd = Mathf.Clamp01(1f - last / Mathf.Max(1e-4f, assembly.PathLength));
+        if (assembly.PathTurnEnd <= assembly.PathTurnStart + 0.05f)
+        {
+            assembly.PathTurnStart = 0f;
+            assembly.PathTurnEnd = 1f;
+        }
+    }
+
+    // The point `amount` (0..1, eased) along an assembly's path, at even speed along its length, with each corner
+    // rounded into a curve tangent to both sides (a quadratic through the corner, PathCornerRadius each way).
+    private static Vector3 EvaluatePath(Node node, float amount)
+    {
+        Vector3[] path = node.Path;
+        int count = node.PathCount;
+        float s = Mathf.Clamp01(amount) * node.PathLength;
+        float start = 0f;
+        for (int i = 0; i < count - 1; i++)
+        {
+            float length = Vector3.Distance(path[i], path[i + 1]);
+            float end = start + length;
+            if (s <= end || i == count - 2)
+            {
+                float along = Mathf.Clamp(s - start, 0f, length);
+                // Near a corner (not the path's ends) the curve takes over.
+                if (i + 1 < count - 1)
+                {
+                    float next = Vector3.Distance(path[i + 1], path[i + 2]);
+                    float r = Mathf.Min(PathCornerRadius, 0.45f * length, 0.45f * next);
+                    if (r > 1e-4f && along > length - r)
+                        return RoundCorner(path[i], path[i + 1], path[i + 2], r, along - (length - r));
+                }
+                if (i > 0)
+                {
+                    float previous = Vector3.Distance(path[i - 1], path[i]);
+                    float r = Mathf.Min(PathCornerRadius, 0.45f * length, 0.45f * previous);
+                    if (r > 1e-4f && along < r)
+                        return RoundCorner(path[i - 1], path[i], path[i + 1], r, r + along);
+                }
+                return length > 1e-6f ? Vector3.Lerp(path[i], path[i + 1], along / length) : path[i + 1];
+            }
+            start = end;
+        }
+        return path[count - 1];
+    }
+
+    // On the rounded corner at b (from the side a-b into b-c): `into` (0..2r) along it.
+    private static Vector3 RoundCorner(Vector3 a, Vector3 b, Vector3 c, float r, float into)
+    {
+        Vector3 p0 = b + (a - b).normalized * r;
+        Vector3 p2 = b + (c - b).normalized * r;
+        float t = Mathf.Clamp01(into / (2f * r));
+        float u = 1f - t;
+        return u * u * p0 + 2f * u * t * b + t * t * p2;
+    }
+
+    // The share of the path's length after which an assembly turning on the way (the cockpit, the seats) has turned.
+    private static float GetPathTurn(Node node, float amount)
+    {
+        if (node.PathCount < 3)
+            return amount;
+        float t = (amount - node.PathTurnStart) / Mathf.Max(1e-4f, node.PathTurnEnd - node.PathTurnStart);
+        return Smooth(Mathf.Clamp01(t));
     }
 
     private static Bounds RotateBounds(Bounds bounds, float yaw, Vector3 pivot)
@@ -831,39 +1704,11 @@ public sealed partial class CarExplorerController
         return result;
     }
 
-    // The car's side toward the viewer (the V6 steps aside to the other one).
-    private Vector3 GetSideTowardViewer(Vector3 viewer)
-    {
-        return Vector3.Dot(viewer - carRestCenter, carRight) >= 0f ? carRight : -carRight;
-    }
-
-    // Moves `spread` out of the car along `direction` until it clears the car's rest bounds by FocusClearance, with
-    // its centre at `height` above the floor (kept off the floor and under FocusMaxHeight).
-    private Vector3 OutOfCar(Bounds spread, Vector3 direction, float height)
-    {
-        GetExtentAlong(carRestBounds, direction, out float carCenter, out float carHalf);
-        GetExtentAlong(spread, direction, out float center, out float half);
-        float shift = Mathf.Max(0f, carCenter + carHalf + FocusClearance - (center - half));
-        float floor = GetFloorTop();
-        float lift = floor + height - spread.center.y;
-        lift = Mathf.Max(lift, floor + FloorClearance - spread.min.y);
-        lift = Mathf.Min(lift, FocusMaxHeight - spread.max.y);
-        return direction * shift + Vector3.up * lift;
-    }
-
     private static void GetExtentAlong(Bounds bounds, Vector3 axis, out float center, out float half)
     {
         center = Vector3.Dot(bounds.center, axis);
         Vector3 e = bounds.extents;
         half = Mathf.Abs(e.x * axis.x) + Mathf.Abs(e.y * axis.y) + Mathf.Abs(e.z * axis.z);
-    }
-
-    // Straight up until `spread` clears the car's roof by `gap`, with its centre BelowEye under the eye at most (so
-    // the visitor looks down on it; lower than the roof, the place usually runs into the car and is not taken).
-    private Vector3 AboveCar(Bounds spread, float gap, Vector3 eye)
-    {
-        float lift = Mathf.Max(0f, carRestBounds.max.y + gap - spread.min.y);
-        return Vector3.up * Mathf.Min(lift, Mathf.Max(0f, eye.y - BelowEye - spread.center.y));
     }
 
     private float GetFloorTop()
@@ -951,39 +1796,6 @@ public sealed partial class CarExplorerController
         return count >= overlapBuffer.Length;
     }
 
-    // A place above the car (AboveCar, then `shift`) that stays below the eye: where it runs into the rest of the car
-    // it slides out along `direction` in 10 cm steps, up to 1.5 m, and it comes down in 10 cm steps (three at most)
-    // while it reaches out of the view; the first place clear of the other parts and in view wins, else the first
-    // clear one.
-    private Vector3 AboveCarClear(Bounds spread, float gap, Vector3 shift, Vector3 direction, Vector3 eye)
-    {
-        Vector3 lift = AboveCar(spread, gap, eye);
-        Vector3 first = shift + lift;
-        bool clearFound = false;
-        for (int drop = 0; drop < 4; drop++)
-        {
-            Vector3 lowered = lift - Vector3.up * (0.1f * drop);
-            if (drop > 0 && lowered.y < 0f)
-                break;
-            for (int step = 0; step <= 15; step++)
-            {
-                Vector3 offset = shift + lowered + direction * (0.1f * step);
-                Bounds target = spread;
-                target.center += offset;
-                if (HitsParts(target))
-                    continue;
-                if (GetViewShare(target) >= ViewShareRequired)
-                    return offset;
-                if (!clearFound)
-                {
-                    clearFound = true;
-                    first = offset;
-                }
-            }
-        }
-        return first;
-    }
-
     // The free part of the view: what the HUD leaves free on the desktop, the central 70 % of the field of view in XR.
     private Rect GetFreeView()
     {
@@ -1001,30 +1813,30 @@ public sealed partial class CarExplorerController
             return 1f;
         if (!TryGetViewRect(box, out Rect rect))
             return 0f;
-        Rect free = GetFreeView();
+        return GetShare(rect, GetFreeView());
+    }
+
+    private static float GetShare(Rect rect, Rect free)
+    {
         float x = Mathf.Max(0f, Mathf.Min(rect.xMax, free.xMax) - Mathf.Max(rect.xMin, free.xMin));
         float y = Mathf.Max(0f, Mathf.Min(rect.yMax, free.yMax) - Mathf.Max(rect.yMin, free.yMin));
         float area = rect.width * rect.height;
         return area > 1e-8f ? x * y / area : free.Contains(rect.center) ? 1f : 0f;
     }
 
-    // How far the box's screen centre lies from the middle of the free view (viewport units; 2 when behind the eye).
-    private float GetViewOffCentre(Bounds box)
-    {
-        if (viewCamera == null || !TryGetViewRect(box, out Rect rect))
-            return 2f;
-        return Vector2.Distance(rect.center, GetFreeView().center);
-    }
-
+    // The box's screen rectangle in the view placement works for (PreparePlacementView); false when it reaches
+    // behind the near plane.
     private bool TryGetViewRect(Bounds box, out Rect rect)
     {
         rect = default;
-        float near = viewCamera.nearClipPlane;
+        bool manual = placementFromWalk || placementShifted || viewCamera == null;
+        float near = manual ? placementNear : viewCamera.nearClipPlane;
         Vector2 min = new Vector2(float.MaxValue, float.MaxValue);
         Vector2 max = new Vector2(float.MinValue, float.MinValue);
         for (int i = 0; i < 8; i++)
         {
-            Vector3 point = viewCamera.WorldToViewportPoint(GetBoxCorner(box, i));
+            Vector3 corner = GetBoxCorner(box, i);
+            Vector3 point = manual ? GetPlacementViewportPoint(corner) : viewCamera.WorldToViewportPoint(corner);
             if (point.z < near)
                 return false;
             min = Vector2.Min(min, point);
@@ -1032,6 +1844,144 @@ public sealed partial class CarExplorerController
         }
         rect = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
         return true;
+    }
+
+    // ---------------------------------------------------------------- the view placement works for
+
+    // Placement looks through the camera as it is when the command runs, except while the desktop inspect camera is
+    // away from the body (and flies back to it): then it looks through the walking view the inspect camera left, where
+    // the visitor will look from again, so nothing opened while inspecting lands at the edge of that view.
+    private void PreparePlacementView()
+    {
+        placementFromWalk = walkViewKnown && walkCamera == viewCamera && viewCamera != null && !IsXrView() &&
+                            (CarExplorerInspect.Active || inspectReturnPending);
+        if (placementFromWalk)
+        {
+            placementEye = walkEye;
+            placementRotation = walkRotation;
+            placementTanX = walkTanX;
+            placementTanY = walkTanY;
+            placementNear = walkNear;
+        }
+        else if (viewCamera != null)
+        {
+            Transform cameraTransform = viewCamera.transform;
+            placementEye = cameraTransform.position;
+            placementRotation = cameraTransform.rotation;
+            placementTanY = Mathf.Tan(viewCamera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+            placementTanX = placementTanY * Mathf.Max(0.1f, viewCamera.aspect);
+            placementNear = viewCamera.nearClipPlane;
+        }
+        else
+        {
+            // No camera: a visitor 6 m in front of the car, looking at it.
+            placementEye = carRestCenter + carForward * 6f + Vector3.up * 1.1f;
+            placementRotation = Quaternion.LookRotation(carRestCenter - placementEye, Vector3.up);
+            placementTanY = Mathf.Tan(30f * Mathf.Deg2Rad);
+            placementTanX = placementTanY * 16f / 9f;
+            placementNear = 0.05f;
+        }
+        placementInverse = Quaternion.Inverse(placementRotation);
+        // A step back planned in this command or under way: placement works for the eye at its end.
+        placementBodyEye = placementEye;
+        placementShifted = false;
+        if (!placementFromWalk && viewCamera != null && !IsXrView())
+        {
+            ICarExplorerStepBackBody stepBody = CarExplorerStepBack.Body;
+            Vector3 shift = pendingStepBack + (stepBody != null ? stepBody.StepBackRemaining : Vector3.zero);
+            if (shift.sqrMagnitude > 1e-6f)
+            {
+                placementEye += shift;
+                placementShifted = true;
+            }
+        }
+    }
+
+    // A world point in the placement view's viewport (z: the distance ahead of the eye), for a plain perspective view.
+    private Vector3 GetPlacementViewportPoint(Vector3 world)
+    {
+        Vector3 local = placementInverse * (world - placementEye);
+        if (local.z <= 1e-4f)
+            return new Vector3(0.5f, 0.5f, local.z);
+        return new Vector3(0.5f + 0.5f * local.x / (local.z * placementTanX),
+            0.5f + 0.5f * local.y / (local.z * placementTanY), local.z);
+    }
+
+    // The direction from the placement eye through a viewport point.
+    private Vector3 GetPlacementDirection(Vector2 viewportPoint)
+    {
+        Vector3 local = new Vector3((viewportPoint.x * 2f - 1f) * placementTanX, (viewportPoint.y * 2f - 1f) * placementTanY, 1f);
+        return (placementRotation * local).normalized;
+    }
+
+    // Every frame: the walking view is recorded while the desktop camera follows the body. When the inspect camera
+    // ends, its flight back to the body is awaited (the camera holds still on the body for two frames, or
+    // InspectReturnTimeout); then what is out is placed again for the walking eye where it no longer fits.
+    private void TrackWalkingView()
+    {
+        bool inspecting = CarExplorerInspect.Active && !IsXrView();
+        if (inspecting != inspectSeen)
+        {
+            inspectSeen = inspecting;
+            inspectReturnPending = !inspecting && walkViewKnown;
+            inspectReturnClock = 0f;
+            inspectStillFrames = 0;
+            if (viewCamera != null)
+                inspectReturnLocal = viewCamera.transform.localPosition;
+        }
+        if (viewCamera == null || inspecting)
+            return;
+        if (inspectReturnPending)
+        {
+            inspectReturnClock += Time.unscaledDeltaTime;
+            Vector3 local = viewCamera.transform.localPosition;
+            inspectStillFrames = (local - inspectReturnLocal).sqrMagnitude < 1e-10f ? inspectStillFrames + 1 : 0;
+            inspectReturnLocal = local;
+            if ((inspectStillFrames < 2 || inspectReturnClock < 0.15f) && inspectReturnClock < InspectReturnTimeout)
+                return;
+            inspectReturnPending = false;
+            RecordWalkingView();
+            ReplaceForWalkingEye();
+            return;
+        }
+        RecordWalkingView();
+    }
+
+    private void RecordWalkingView()
+    {
+        Transform cameraTransform = viewCamera.transform;
+        walkCamera = viewCamera;
+        walkEye = cameraTransform.position;
+        walkRotation = cameraTransform.rotation;
+        walkTanY = Mathf.Tan(viewCamera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+        walkTanX = walkTanY * Mathf.Max(0.1f, viewCamera.aspect);
+        walkNear = viewCamera.nearClipPlane;
+        walkViewKnown = true;
+    }
+
+    // Back from the inspect camera at the walking eye: the taken-out assembly (in one piece or one level apart) comes
+    // to the visitor again where it no longer fits that view (RefitTakenOut), and the open levels come out again from
+    // there, or when the deepest one is out of the free view; nothing moves while everything still fits.
+    private void ReplaceForWalkingEye()
+    {
+        if (!initialized || takenOut == null || view == CarExplorerView.Exploded)
+            return;
+        bool moved = RefitTakenOut();
+        bool pull = moved;
+        if (!pull && openPath.Count > 0 && openPath[openPath.Count - 1] != takenOut)
+        {
+            PreparePlacementView();
+            pull = GetViewShare(GetPlannedBounds(openPath[openPath.Count - 1], true)) < ViewShareRequired;
+        }
+        if (!pull)
+            return;
+        foreach (Node node in openPath)
+            ComputePull(node);
+        foreach (Node node in openPath)
+            KeepSpreadInRoom(node);
+        KeepOutOfFootprint();
+        StartStateMove(false);
+        NotifyChanged();
     }
 
     // The podium under the car (Circular Display), seen from above: its centre and radius, when it is under the car.

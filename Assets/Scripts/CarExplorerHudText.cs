@@ -37,6 +37,7 @@ public static class CarExplorerHudText
 {
     public static readonly HudString Structure = new HudString("STRUCTURE", "TUZILMA");
     public static readonly HudString PartsSuffix = new HudString(" parts", " ta qism");
+    public static readonly HudString SystemsSuffix = new HudString(" systems", " ta tizim");
     public static readonly HudString Parts = new HudString("Parts", "Qismlar");
     public static readonly HudString Systems = new HudString("Systems", "Tizimlar");
     public static readonly HudString Material = new HudString("Material", "Material");
@@ -73,6 +74,11 @@ public static class CarExplorerHudText
     public static readonly HudString Inspect = new HudString("Inspect", "Yaqindan ko‘rish");
     public static readonly HudString ExitInspect = new HudString("Exit inspect", "Yurishga qaytish");
 
+    public static readonly HudString StructureTab = new HudString("Structure", "Tuzilma");
+    public static readonly HudString ExploreChip = new HudString("Click a part to explore", "Qismni bosib o‘rganing");
+    public static readonly HudString More = new HudString("More", "Batafsil");
+    public static readonly HudString Less = new HudString("Less", "Qisqaroq");
+
     public static readonly HudString OverviewHint = new HudString(
         "Select a part on the car, or a row in STRUCTURE. Explode takes the selected unit apart one level at a time.",
         "Avtomobildagi qismni yoki TUZILMA ro‘yxatidagi qatorni tanlang. " +
@@ -101,7 +107,8 @@ public static class CarExplorerHudText
         new HudKey("WASD", "move", "yurish"), new HudKey("Mouse", "Sichqoncha", "look", "qarash"),
         new HudKey("Click", "Bosish", "select", "tanlash"), new HudKey("T", "X-ray", "rentgen"),
         new HudKey("O", "explode", "ajratish"), new HudKey("R", "back", "orqaga"),
-        new HudKey("Tab", "cursor", "kursor"), new HudKey("H", "help", "yordam")
+        new HudKey("Tab", "cursor", "kursor"), new HudKey("I", "hide panels", "panellarni yashirish"),
+        new HudKey("H", "help", "yordam")
     };
 
     /// <summary>Desktop hint near the car while something is selected: F frames it with the inspect camera.</summary>
@@ -110,7 +117,40 @@ public static class CarExplorerHudText
         new HudKey("WASD", "move", "yurish"), new HudKey("Mouse", "Sichqoncha", "look", "qarash"),
         new HudKey("Click", "Bosish", "select", "tanlash"), new HudKey("F", "inspect", "yaqindan ko‘rish"),
         new HudKey("T", "X-ray", "rentgen"), new HudKey("O", "explode", "ajratish"), new HudKey("R", "back", "orqaga"),
-        new HudKey("Tab", "cursor", "kursor"), new HudKey("H", "help", "yordam")
+        new HudKey("Tab", "cursor", "kursor"), new HudKey("I", "hide panels", "panellarni yashirish"),
+        new HudKey("H", "help", "yordam")
+    };
+
+    /// <summary>Desktop hint near the car while the visitor has hidden the panels (I).</summary>
+    public static readonly HudKey[] HintHidden =
+    {
+        new HudKey("WASD", "move", "yurish"), new HudKey("Mouse", "Sichqoncha", "look", "qarash"),
+        new HudKey("Click", "Bosish", "select", "tanlash"), new HudKey("Tab", "cursor", "kursor"),
+        new HudKey("I", "show panels", "panellarni ko‘rsatish"), new HudKey("H", "help", "yordam")
+    };
+
+    // The same in a small window (CarExplorerHudScaler.Compact): only what the panels do not show already.
+    public static readonly HudKey[] HintNearCompact =
+    {
+        new HudKey("Click", "Bosish", "select", "tanlash"), new HudKey("Tab", "cursor", "kursor"),
+        new HudKey("I", "hide panels", "panellarni yashirish"), new HudKey("H", "help", "yordam")
+    };
+
+    public static readonly HudKey[] HintNearSelectedCompact =
+    {
+        new HudKey("F", "inspect", "yaqindan ko‘rish"), new HudKey("Tab", "cursor", "kursor"),
+        new HudKey("I", "hide panels", "panellarni yashirish"), new HudKey("H", "help", "yordam")
+    };
+
+    public static readonly HudKey[] HintHiddenCompact =
+    {
+        new HudKey("Tab", "cursor", "kursor"), new HudKey("I", "show panels", "panellarni ko‘rsatish"),
+        new HudKey("H", "help", "yordam")
+    };
+
+    public static readonly HudKey[] HintFarCompact =
+    {
+        new HudKey("WASD", "move", "yurish"), new HudKey("Tab", "cursor", "kursor"), new HudKey("H", "help", "yordam")
     };
 
     /// <summary>Desktop hint while the inspect camera orbits a node (CarExplorerInspect.Active).</summary>
@@ -155,6 +195,8 @@ public static class CarExplorerHudText
             "Panellar uchun kursorni bo‘shatish / qulflash"),
         new HudKey("E", "Entrance doors: they open as you approach; E opens or closes them by hand",
             "Kirish eshiklari yaqinlashganda o‘zi ochiladi; E — qo‘lda ochish / yopish"),
+        new HudKey("P", "STRUCTURE tree: open / close", "TUZILMA daraxti: ochish / yopish"),
+        new HudKey("I", "Hide / show all panels", "Barcha panellarni yashirish / ko‘rsatish"),
         new HudKey("Q / U", "English / Uzbek", "Inglizcha / O‘zbekcha"),
         new HudKey("H", "This help", "Ushbu yordam")
     };

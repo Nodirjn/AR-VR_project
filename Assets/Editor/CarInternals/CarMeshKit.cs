@@ -794,6 +794,8 @@ namespace CarInternals
             mesh.subMeshCount = used;
             for (int s = 0; s < used; s++) mesh.SetTriangles(submeshes[s], s, false);
             mesh.RecalculateBounds();
+            // Tangents for the palette's normal maps (from the metre UVs).
+            mesh.RecalculateTangents();
         }
     }
 

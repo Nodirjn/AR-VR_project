@@ -145,6 +145,38 @@ namespace AurelleRealism
     internal static class InteriorPodium
     {
         private const string Root = "Showroom Environment/Circular Display/";
+        private const string DeckMaterialName = "Interior_Stone_PodiumDeckPlanar";
+        private const string PlanarShaderName = "Aurelle/Planar Reflective Lit";
+        // A hint of polish haze: at 1.0 the key light's highlight on the deck was a clipped pinpoint.
+        private const float DeckSmoothness = 0.9f;
+
+        /// <summary>
+        /// The deck's own copy of the black marble on Aurelle/Planar Reflective Lit (URP Lit plus the planar reflection
+        /// of the hero car that AurellePlanarReflection renders at Ultra on the desktop). Same properties, textures and
+        /// keywords as the marble; falls back to the marble itself when the shader is missing.
+        /// </summary>
+        private static Material DeckMaterial(Material marble)
+        {
+            Shader planar = Shader.Find(PlanarShaderName);
+            if (planar == null)
+            {
+                InteriorRealismUpgrade.Log("podium deck: shader '" + PlanarShaderName + "' missing, plain marble kept");
+                return marble;
+            }
+            string path = InteriorRealismUpgrade.MaterialFolder + "/" + DeckMaterialName + ".mat";
+            Material mat = UnityEditor.AssetDatabase.LoadAssetAtPath<Material>(path);
+            if (mat == null)
+            {
+                mat = new Material(planar) { name = DeckMaterialName };
+                UnityEditor.AssetDatabase.CreateAsset(mat, path);
+            }
+            if (mat.shader != planar) mat.shader = planar;
+            mat.CopyPropertiesFromMaterial(marble);
+            mat.SetFloat("_Smoothness", DeckSmoothness);
+            mat.enableInstancing = true;
+            UnityEditor.EditorUtility.SetDirty(mat);
+            return mat;
+        }
 
         public static void Apply(InteriorContext ctx)
         {
@@ -168,7 +200,7 @@ namespace AurelleRealism
                 float r = deck.lossyScale.x * 0.5f, h = deck.lossyScale.y;
                 Mesh mesh = InteriorShapes.ForObject(deck, "Interior_PodiumDeck", 1, true, b =>
                     b.Lathe(Vector3.zero, new List<Vector2> { new Vector2(0f, -h), new Vector2(r, -h), new Vector2(r, h - 0.003f), new Vector2(r - 0.003f, h), new Vector2(0f, h) }, 160, 0));
-                ctx.Restyle(deck, mesh, m.BlackMarble());
+                ctx.Restyle(deck, mesh, DeckMaterial(m.BlackMarble()));
             }
 
             float deckTop = deck != null ? deck.position.y + deck.lossyScale.y : 0.018f;
