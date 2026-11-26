@@ -100,7 +100,8 @@ public sealed class ExteriorTrafficCarAgent : MonoBehaviour
             float alignment = Vector3.Dot(other.heading, heading);
             if (alignment < -0.5f) continue;
             float gap = FreeDistance(Flat(other.transform.position - position), heading, halfLength, HalfWidth, other.heading, other.bodyLength * 0.5f, HalfWidth);
-            if (alignment > 0.7f) limit = Mathf.Min(limit, StoppingSpeed(gap - 2f));
+            // Following: 6 m when stopped and a 1.6 s time gap on the move, as drivers keep, so the traffic does not run as a train.
+            if (alignment > 0.7f) limit = Mathf.Min(limit, Mathf.Min(StoppingSpeed(gap - 6f), Mathf.Max(0f, gap - 6f) / 1.6f));
             else if (Time.time >= ignoreCrossingUntil) crossingLimit = Mathf.Min(crossingLimit, StoppingSpeed(gap - 1f));
         }
         for (int i = 0; i < ExteriorCyclistAgent.Active.Count; i++)
@@ -112,6 +113,13 @@ public sealed class ExteriorTrafficCarAgent : MonoBehaviour
         {
             ExteriorPedestrianAgent pedestrian = ExteriorPedestrianAgent.Active[i];
             if (pedestrian != null) limit = Mathf.Min(limit, YieldSpeed(pedestrian.transform.position, pedestrian.Velocity, heading, 0.35f, 0.35f, position, halfLength));
+        }
+        // The visitor's test-drive car (TestDriveTraffic): yield to it like to a rider.
+        for (int i = 0; i < TestDriveTraffic.Movers.Count; i++)
+        {
+            TestDriveTraffic.Mover mover = TestDriveTraffic.Movers[i];
+            if (mover != null && mover.IsAlive)
+                limit = Mathf.Min(limit, YieldSpeed(mover.Position, mover.Velocity, mover.Heading, mover.HalfLength, mover.HalfWidth, position, halfLength));
         }
         // Deadlock breaker: after waiting long for a car with a clearly different heading, ignore crossing cars briefly.
         if (crossingLimit < limit && speed < 0.3f) crossingWait += dt;

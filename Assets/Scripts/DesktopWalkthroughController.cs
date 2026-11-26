@@ -327,6 +327,39 @@ public sealed class DesktopWalkthroughController : MonoBehaviour, ICarExplorerSt
         Physics.SyncTransforms();
     }
 
+    // ---------------------------------------------------------------- test drive
+
+    /// <summary>The walking body (null until Start has run in desktop mode).</summary>
+    public Transform Body => body;
+
+    /// <summary>Stands the body at <paramref name="feet"/> facing <paramref name="yawDegrees"/>; the test drive uses it to
+    /// put the visitor beside the car and back in the showroom. Ends the inspect camera and any step-back glide.</summary>
+    public void PlaceBody(Vector3 feet, float yawDegrees)
+    {
+        if (body == null) return;
+        StopInspectNow();
+        stepBackActive = false;
+        verticalSpeed = 0f;
+        yaw = yawDegrees;
+        pitch = 0f;
+        bool wasEnabled = character != null && character.enabled;
+        if (character != null) character.enabled = false;
+        body.position = feet;
+        ApplyLook();
+        if (character != null) character.enabled = wasEnabled;
+        Physics.SyncTransforms();
+    }
+
+    /// <summary>Puts the camera back on the body at eye height after the test drive has borrowed it.</summary>
+    public void ReattachCamera()
+    {
+        if (body == null) return;
+        transform.SetParent(body, false);
+        transform.localPosition = new Vector3(0f, eyeHeight, 0f);
+        ApplyLook();
+        LockGameplayCursor();
+    }
+
     // ---------------------------------------------------------------- entrance doors
 
     private void BuildEntranceDoor()

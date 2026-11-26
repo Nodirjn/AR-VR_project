@@ -112,6 +112,10 @@ The MIT License in [LICENSE](LICENSE) covers this project's own code and content
 - **File:** `Assets/Models/ExteriorPedestrians/Maya_RelaxedWalk.glb`, not referenced by any scene or asset.
 - **Licence:** CC0 1.0 according to its embedded metadata (node "Maya character": `source_license` "CC0-1.0 graphical assets; authored rest character", `motion_source` "Original authored mathematical IK recipes; no capture data", `capture_data_used` false). The node extras show it was built from MPFB (MakeHuman) assets and exported with the Khronos glTF Blender I/O add-on.
 
+### City test drive assets
+
+The traffic vehicles (CC BY 4.0, comrade1280) and the generated trees (ez-tree, MIT) used by the test drive are listed in [Docs/CREDITS_TEST_DRIVE.md](Docs/CREDITS_TEST_DRIVE.md).
+
 ## Textures and sky
 
 - **Poly Haven surface maps** in `Assets/Environment/Textures/PolyHaven`: [asphalt_02](https://polyhaven.com/a/asphalt_02) and [granular_concrete](https://polyhaven.com/a/granular_concrete), 2K, licensed [CC0 1.0](https://polyhaven.com/license) as recorded in `README.txt` there. The `*_metallic_smoothness.png` files are packing textures derived from them.

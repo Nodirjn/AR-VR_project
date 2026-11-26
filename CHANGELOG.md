@@ -4,6 +4,13 @@ Notable changes to this project are recorded here. The project has no tagged rel
 
 ## [Unreleased]
 
+### City test drive
+
+- Every car of the premium collection and the hero CarConcept can be test-driven: choose it at its stand, open the door, sit in a head-tracked cabin and drive with the Quest controllers or the keyboard. Automatic gearbox with P/R/N/D on the car's own instrument cluster, ABS, traction control and a synthesised engine sound per car ([Docs/TEST_DRIVE.md](Docs/TEST_DRIVE.md)).
+- The district grows into a city: Ocean Drive, a beach and the sea, new blocks with ground-floor shops, parks, playgrounds, parking lots and bus stops; a day/night cycle with street lighting on every street and headlights on every car.
+- Traffic: 24 vehicle types (CC BY 4.0, see [Docs/CREDITS_TEST_DRIVE.md](Docs/CREDITS_TEST_DRIVE.md)) in both directions with drivers, keeping their distance and stopping at shops.
+- People: a stride-based walking gait for all pedestrians, shoppers, seated office workers, bench sitters; enterable shop interiors; pigeons and gulls.
+
 ### Realism
 
 Editor tools under **Aurelle > Realism** rebuilt the look of the showroom, the cars, the people and the cyclists' bicycles. The run order is in the README.

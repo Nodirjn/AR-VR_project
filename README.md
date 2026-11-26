@@ -1,12 +1,94 @@
-# AR-VR Project: Aurelle Car Showroom
+<div align="center">
 
-A Unity project for "Aurelle", a fictional car dealership: a glazed showroom whose hero car, the CarConcept, can be taken apart level by level down to single parts of its procedurally built internals, a procedurally animated presenter (Remy), a premium car collection and a generated city district around the building. The same scene runs as a desktop first-person walkthrough by default and switches to the XR rig when a headset is active.
+# Aurelle — VR Car Showroom & City Test Drive
+
+**An immersive Meta Quest 3 experience: explore a premium car dealership, take a concept car apart down to its last bolt, then pick any car on the floor and drive it through a living city.**
+
+![Unity](https://img.shields.io/badge/Unity-6000.3.12f1-black?logo=unity)
+![URP](https://img.shields.io/badge/Render%20Pipeline-URP%2017.3-blue)
+![OpenXR](https://img.shields.io/badge/XR-OpenXR%201.17-7b2ff7)
+![Platform](https://img.shields.io/badge/Platform-Meta%20Quest%203%20%7C%20macOS%20%7C%20Windows-0a7cff)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+AR/VR course project · Central Asian University, Tashkent
+
+</div>
+
+---
+
+## Overview
+
+Aurelle is a fictional car brand, and this project is its virtual flagship store. A visitor wearing a Meta Quest 3 (or walking in first-person on a desktop) enters a glazed showroom, is greeted by an animated presenter, and can:
+
+1. **Explore** the hero concept car as an interactive engineering model: X-ray it, explode it, and take any of its 1,302 parts out one level at a time, with English and Uzbek descriptions.
+2. **Test-drive** any car in the collection: walk to it, open the door, sit in a head-tracked cabin and drive through a day/night city with traffic, pedestrians, shops, a beach and birds.
+
+Everything runs from a single scene (`Assets/Scenes/SampleScene.unity`). The desktop walkthrough is the default; the XR rig takes over automatically when a headset is active.
+
+## Highlights
+
+| Area | What you get |
+| --- | --- |
+| **Showroom** | Glazed dealership with baked lighting, studio softbox over the hero car, premium collection (BMW M3 E30, BMW M4 Competition, Tesla Model 3) |
+| **Car Explorer** | Structure tree of 13 systems → 54 assemblies → 1,302 parts; Normal / X-ray / Exploded views; parts fly out toward the visitor without clipping the car |
+| **Presenter** | Procedurally animated guide (Remy) who welcomes the visitor and points at the selected part |
+| **Test drive** | Every display car and the hero concept are drivable: door, seat, steering wheel and instrument cluster from the model's own geometry; automatic gearbox (P/R/N/D), ABS, traction control, synthesised engine sound per car |
+| **Living city** | Day/night cycle (24 min per day), street lighting on every street, 24 vehicle types in two-way traffic with drivers, cars stopping at shops, pedestrians with a natural gait, enterable shops (pharmacy, market, clothing, guns, café, office…), parks, playgrounds, beach and sea, pigeons and gulls |
+| **Quest-ready** | One-click Android build, Low quality tier with a Quest draw-call budget, reduced crowds and lights on the headset |
+
+## Team
+
+| Role | Member | Responsibilities |
+| --- | --- | --- |
+| Project coordinator & documentation | **Ibrohim Abralov** | Requirements, README, slides, repository organisation |
+| Unity XR & interaction | **Bobur Uchqunov** | XR Origin, OpenXR / Quest setup, `CarExplorerController`, XRI interactions |
+| 3D assets, environment & optimisation | **Nodirjon Habibullaev** | Vehicle hierarchy, showroom scene, Remy, Quest performance, city test drive |
+| Testing, evaluation & presentation | **Abdurashid Abdusattarov** | Device testing, usability sessions, demo rehearsal |
+
+## Tech stack
 
 - **Unity Editor:** 6000.3.12f1, exactly (`ProjectSettings/ProjectVersion.txt`)
 - **Rendering:** Universal Render Pipeline 17.3.0
 - **XR:** OpenXR 1.17.1 through XR Plug-in Management 4.6.0; XR Interaction Toolkit 3.5.1 rig from the Unity VR template
 - **Input:** Input System 1.19.0 only (the legacy Input Manager is disabled)
+- **Models:** glTFast 6.20.0 (GLB/glTF import), KTX for Unity 3.7.1
 - **Scene:** `Assets/Scenes/SampleScene.unity`, the only scene in the build list
+
+## Quick start
+
+```sh
+git lfs install
+git clone https://github.com/Nodirjn/AR-VR_project.git
+```
+
+1. Open the folder in **Unity Hub** with Unity **6000.3.12f1** (add **Android Build Support** with OpenJDK and Android SDK & NDK for Quest).
+2. Open `Assets/Scenes/SampleScene.unity` and press **Play**.
+3. On the desktop: walk with **WASD**, look with the mouse, press **G** while looking at a car to start a test drive.
+4. For the headset: **Aurelle → Build → Quest APK**, then `adb install -r Builds/Aurelle-Quest.apk` (Quest in developer mode). The app appears under *Unknown Sources*.
+
+## City test drive
+
+Choose a car at its stand (Quest: trigger on *Start test drive*; desktop: **G**), walk to the driver's door, open it and get in. The engine starts when the door closes.
+
+| Action | Meta Quest 3 | Desktop |
+| --- | --- | --- |
+| Accelerate / brake | Right trigger / left trigger | W / S |
+| Steer | Thumbstick | A / D |
+| Reverse | Hold brake at standstill, or A | Hold S at standstill, or R |
+| Handbrake | Right grip | Space |
+| Open door / get in / get out | A / A / B | E |
+| Horn / headlights | Y / X | H / L |
+| Recentre seat | Left thumbstick click | C |
+| Chase camera | — | V |
+| Back to the showroom | Hold Menu 1.2 s | Hold Backspace |
+
+Walk up to a shop on foot and its door slides open: the ground floor becomes a furnished, lit interior you can enter. The whole test drive is built at runtime from the scene (`Assets/Scripts/TestDrive/`); it changes nothing in the showroom until a drive starts. Details: [Docs/TEST_DRIVE.md](Docs/TEST_DRIVE.md). Asset credits: [Docs/CREDITS_TEST_DRIVE.md](Docs/CREDITS_TEST_DRIVE.md).
+
+---
+
+# Reference
+
+The rest of this document describes the showroom and the Car Explorer in depth.
 
 ## Getting started
 
@@ -230,7 +312,10 @@ Assets/
   Editor/            AurelleRealism/: the realism tools (Aurelle > Realism); CarInternals/: the car internals tool
                      (Aurelle > Car Internals) with one file per subsystem in Systems/; AurelleAutoCheck/: the Play
                      Mode check harness; AurelleBuild.cs: the Quest build (Aurelle > Build)
-  Resources/         AurelleDepthTestedText.shader and AurelleXRayGhost.shader, loaded at runtime
+  Scripts/TestDrive/ The city test drive, built at run time: drivable cars, the expanded city, traffic, people,
+                     enterable shops, birds, day and night (see Docs/TEST_DRIVE.md)
+  Resources/         AurelleDepthTestedText.shader and AurelleXRayGhost.shader, loaded at runtime; the test drive's
+                     shaders (TestDrive*.shader) and its traffic models, trees and shop atlases in TestDrive/
   Models/            CarConcept.glb, V6_Engine_Prototype.glb, ShowroomCollection/, Presenter/Remy.fbx and
                      Presenter/Textures/ (derived from it), ExteriorPedestrians/ (unused), Exterior/ (generated meshes),
                      CarInternals/ (generated internals meshes, V6/ merged V6 meshes), Bicycle/ (generated bicycle meshes)
@@ -248,12 +333,14 @@ Assets/
   Backups/           Old controller and scene backups, not used (as are the CarExplorerController_*.cs.txt files)
 Packages/            Package manifest and lock file
 ProjectSettings/     Player, quality, graphics, input, tag and layer, and build settings
-Docs/                ARCHITECTURE.md
+Docs/                ARCHITECTURE.md, TEST_DRIVE.md, CREDITS_TEST_DRIVE.md
 ```
 
 ## Further documentation
 
 - [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md): scripts, startup order, the Car Explorer, its HUD and their contracts, Remy, the exterior agents, the editor tools and their run order, rendering, naming contracts, measured scale and frame cost
+- [Docs/TEST_DRIVE.md](Docs/TEST_DRIVE.md): the city test drive, its scripts, controls and tuning
+- [Docs/CREDITS_TEST_DRIVE.md](Docs/CREDITS_TEST_DRIVE.md): third-party assets used by the test drive
 - [CONTRIBUTING.md](CONTRIBUTING.md): Unity version, Git workflow and LFS, regenerating the district, changing the look, changing or adding internals, the explorer's contracts, verification
 - [CHANGELOG.md](CHANGELOG.md): history of notable changes
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): third-party models, textures, fonts, shader code and packages
